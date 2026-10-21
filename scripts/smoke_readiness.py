@@ -21,6 +21,42 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def automation_check(cli, root):
+    """Exercise the real pinned scheduler contract. Discord is absent, so only its precheck is bypassed."""
+    spec = importlib.util.spec_from_file_location("readiness_workflows", ROOT / "scripts/tari_automation.py")
+    workflows = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(workflows)
+
+    class FixtureManager(workflows.Manager):
+        def destination(self, channel, target, account=None):
+            return {"channel": channel, "to": target}
+
+    manager = FixtureManager(root / "workflow-state", {}, "Europe/Berlin", cli.openclaw_json)
+    first = manager.enable_brief(target="channel:123456789012345678")
+    again = manager.enable_brief("07:30", "America/Toronto", thinking="high", target="user:123456789012345678")
+    assert first["job_id"] == again["job_id"] and manager.brief_status()["enabled"] is True
+    assert manager.disable_brief()["enabled"] is False and manager.brief_status()["enabled"] is False
+    print("PASS native morning brief: declaration upsert, model/thinking/tools/timezone contract, verified enable/disable")
+    manager.configure_reminders("discord", "user:123456789012345678")
+    fired = manager.create_reminder("12s", "Fixture; $(touch /tmp/tari-injected) %n")
+    cancelled = manager.create_reminder("2h", "Fixture cancellation")
+    assert manager.cancel_reminder(cancelled["job_id"])["cancelled"] is True
+    for _ in range(30):
+        entries = manager.reminder_history(fired["job_id"])["entries"]
+        if entries:
+            break
+        time.sleep(2)
+    else:
+        raise AssertionError("Fixture reminder did not run")
+    # The command ran without a model or shell; delivery honestly failed because Discord is absent.
+    assert entries[0]["status"] == "ok" and entries[0]["delivered"] is False
+    injected = cli.compose_invocation("exec", "-T", "tari", "test", "-e", "/tmp/tari-injected")
+    assert subprocess.run(injected[0], cwd=root, env=injected[1], capture_output=True, timeout=60).returncode == 1
+    rows = {row["job_id"]: row for row in manager.list_reminders(history=True)["reminders"]}
+    assert rows[fired["job_id"]]["enabled"] is False and rows[cancelled["job_id"]]["cancelled"] is True
+    print("PASS native reminders: deterministic argv run, undelivered outcome reported, cancellation, no shell evaluation")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dailygrad", action="store_true")
@@ -105,6 +141,22 @@ def main():
             assert context["sources"]["calendar"]["status"] == "not_configured"
             assert context["sources"]["planner"]["data"]["schedule"]
             print("PASS no DailyGrad: startup, identity file, API auth/routing, planner, documents, brief context")
+
+            jobs = cli.openclaw_json("automations", "list", "--all", "--json")["jobs"]
+            assert not [job["declarationKey"] for job in jobs if job.get("enabled")], "Fresh install must have no enabled jobs"
+            assert invoke("tari_brief_context", {"day": "today"})["read_only"] is True
+            assert invoke("tari_reminder_list", {})["configured"] is False
+            try:
+                blocked = request("/tools/invoke", {"tool": "tari_reminder_list", "args": {},
+                                                    "sessionKey": "agent:tari:cron:fixture:run:1"}).get("ok") is False
+            except urllib.error.HTTPError as error:
+                blocked = error.code in (403, 404)
+            assert blocked, "Scheduled turns must not reach reminder tools"
+            scheduled = request("/tools/invoke", {"tool": "tari_brief_context", "args": {"day": "today"},
+                                                  "sessionKey": "agent:tari:cron:fixture:run:1"})
+            assert scheduled["ok"] and scheduled["result"]["details"]["read_only"] is True
+            print("PASS workflow plugin: no enabled native jobs, brief tool (incl. cron context), owner-only reminder tools hidden from cron turns")
+            automation_check(cli, root)
 
             if args.dailygrad:
                 setup = cli.dailygrad_cli()

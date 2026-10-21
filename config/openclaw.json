@@ -29,6 +29,7 @@
     "tailscale": {"mode": "off"}
   },
   "tools": {"profile": "full", "fs": {"workspaceOnly": true}},
+  "skills": {"workshop": {"autonomous": {"mode": "off"}}},
   "plugins": {
     "load": {"paths": ["/opt/tari/plugins/tari-workflows"]},
     "entries": {

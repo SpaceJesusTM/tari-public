@@ -179,37 +179,54 @@ or merge the relevant instruction changes yourself.
 
 ## Optional integrations and development checks
 
-[Discord](discord.md) uses native OpenClaw setup, pairing, and guild/channel
-configuration; no custom Discord management layer is installed. Connectivity is
-optional and unconfigured by default. [Morning briefs and reminders](automation.md)
+[Discord](discord.md) uses OpenClaw's official channel plugin, native pairing, and
+guild/channel configuration; no custom Discord management layer is installed. It
+is not installed or configured by default. [Morning briefs and reminders](automation.md)
 are separate opt-ins with explicitly chosen destinations. Configuring Discord
 does not create any jobs or enable a heartbeat.
 
-Existing installations can load the new workflow tools after updating source:
+No background model work runs by default: the heartbeat is off, OpenClaw's
+autonomous Skill Workshop learning (including its weekly review job) is set to
+`off`, and Tari creates no jobs until you enable a brief or create a reminder.
+Ordinary chat uses the installation model above; a scheduled brief stores its own
+model and thinking level, so the two can be changed independently. Manual `/learn`
+remains available; opt into autonomous learning only deliberately with
+`./tari openclaw config set skills.workshop.autonomous.mode propose` (or `auto`).
+
+Existing installations created before v0.1 can load the workflow tools and adopt
+these defaults after updating source:
 
 ```sh
 ./tari workspace-update --instructions
 ./tari automation setup
 ./tari start
+./tari openclaw config set skills.workshop.autonomous.mode off
 ```
 
 Review custom startup instructions before replacing them. Setup enables the fixed
-tools and updates their image/configuration; it creates no schedules. The selected
-morning-brief timezone is stored in the native job. After changing installation
-timezone, repeat its enable command with the intended timezone to update that job.
+tools and updates their image/configuration; it creates no schedules. Fresh v0.1
+installations already include the tools. The selected morning-brief timezone is
+stored in the native job. After changing installation timezone, repeat its enable
+command with the intended timezone to update that job.
 
 - [Google setup](google.md): separate read-only mail and optional Calendar writes.
 - [DailyGrad setup](dailygrad.md): digest-only access or separately enabled controls.
 - [API](api.md): trusted backend access, authentication, sessions, and streaming.
 - [Security](../SECURITY.md): complete permission and deployment boundaries.
 
+While developing, run only the tests for what you changed, for example
+`python3 -B -m unittest tests.test_automation` or
+`node --test tests/workflows-plugin/*.test.mjs`. Before a release, run everything
+once:
+
 ```sh
 python3 -B -m unittest discover -s tests
-node --test tests/dailygrad-plugin/*.test.mjs
+node --test tests/dailygrad-plugin/*.test.mjs tests/workflows-plugin/*.test.mjs
 python3 scripts/scan_public.py
 ```
 
 For Docker smoke checks without installed state or credentials, build the images
-as described in [readiness verification](readiness.md#what-was-verified), then run
-`python3 scripts/smoke_readiness.py --dailygrad`. It uses disposable local fixtures;
-it does not call real Google APIs, news generation, or a model.
+as described in [release verification](readiness.md#release-verification), then run
+`python3 scripts/smoke_readiness.py --dailygrad`. It uses disposable local fixtures
+and exercises the real pinned scheduler with a fixture reminder; it does not call
+real Google APIs, Discord, news generation, or a model.

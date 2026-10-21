@@ -1,7 +1,8 @@
 # Optional native Discord
 
-Discord uses the plugin bundled with pinned OpenClaw `v2026.9.9`. It is unconfigured
-by default; CLI chat, browser chat, the Gateway API, and existing tools work without
+Discord uses OpenClaw's official `@openclaw/discord` channel plugin, installed at the
+version matching pinned OpenClaw `v2026.9.9`. It is not installed or configured by
+default; CLI chat, browser chat, the Gateway API, and existing tools work without
 it. Configure Discord through OpenClaw's native CLI and configuration; native
 pairing, user allowlists, and guild/channel policies control access.
 
@@ -29,21 +30,26 @@ pairing, user allowlists, and guild/channel policies control access.
    the Gateway token to Discord.
 
 After [initial setup](setup.md), run `./tari start` so the container receives the
-new environment variable. Native commands operate only inside this installation:
+new environment variable. Then install the plugin version matching the pinned
+runtime and point Discord at the environment-backed token. These native commands
+operate only inside this installation:
 
 ```sh
-./tari openclaw channels add --channel discord --use-env
+./tari openclaw plugins install npm:@openclaw/discord@2026.9.9 --pin
 ./tari openclaw config set channels.discord.token '{"source":"env","provider":"default","id":"DISCORD_BOT_TOKEN"}' --strict-json
+./tari openclaw config set channels.discord.enabled true --strict-json
 ./tari openclaw channels status --channel discord --json
 ./tari openclaw channels status --channel discord --probe
 ```
 
-`--use-env` validates the selected plugin's environment requirements; the explicit
+The install downloads the official package from npm once and keeps it in ignored
+`.local/state/`; keep the explicit version so it matches the pinned Gateway. The
 SecretRef keeps the bot token out of `.local/state/openclaw.json`. If you later
 change `.local/runtime.env`, rerun `./tari start` to recreate the container with
 the new environment. Native configuration reload handles supported channel
 changes. Do not share raw diagnostics without reviewing them for private data.
-See pinned [channel commands](https://github.com/openclaw/openclaw/blob/v2026.9.9/docs/cli/channels.md).
+See pinned [Discord setup](https://github.com/openclaw/openclaw/blob/v2026.9.9/docs/channels/discord/setup.md)
+and [channel commands](https://github.com/openclaw/openclaw/blob/v2026.9.9/docs/cli/channels.md).
 
 ## Pair DMs or authorize guild channels
 
@@ -56,9 +62,14 @@ you want to approve, verify its identity, then approve its code locally:
 ./tari openclaw pairing approve discord CODE
 ```
 
-Codes expire after one hour. You may approve additional trusted people, or choose
-native `dmPolicy: "allowlist"` with explicit `allowFrom` user IDs. Pairing/allowlists
-do not automatically grant native operator-command ownership. See pinned
+Codes expire after one hour. **Approve your own account first:** while no native
+owner exists, the first CLI pairing approval also records that sender in
+`commands.ownerAllowFrom`. Later approvals and allowlist entries grant chat access
+only, never ownership. To set the owner explicitly instead, run
+`./tari openclaw config set commands.ownerAllowFrom '["discord:YOUR_USER_ID"]' --strict-json`.
+Tari's reminder tools work in Discord only for that native owner. You may approve
+additional trusted people, or choose native `dmPolicy: "allowlist"` with explicit
+`allowFrom` user IDs. See pinned
 [pairing](https://github.com/openclaw/openclaw/blob/v2026.9.9/docs/channels/pairing.md)
 and [Discord access control](https://github.com/openclaw/openclaw/blob/v2026.9.9/docs/channels/discord/access-control.md).
 

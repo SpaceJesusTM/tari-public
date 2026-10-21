@@ -235,7 +235,11 @@ class Manager:
             raise WorkflowError("Choose an explicit native Discord destination: user:ID or channel:ID")
         if account is not None and (not isinstance(account, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", account)):
             raise WorkflowError("Invalid native channel account ID")
-        status = self.native("channels", "status", "--channel", channel, "--json")
+        try:
+            status = self.native("channels", "status", "--channel", channel, "--json")
+        except WorkflowError:
+            # Native status fails outright while the Discord plugin/channel is not set up.
+            raise WorkflowError("Discord status is unavailable. Install and connect Discord with native OpenClaw setup first; no job was enabled") from None
         if not isinstance(status, dict):
             raise WorkflowError("Native delivery status is malformed; no job was enabled")
         rows = status.get("channelAccounts") if isinstance(status, dict) else None
@@ -261,12 +265,14 @@ class Manager:
     def declare(self, key, name, flags):
         result = self.native("automations", "add", "--name", name, "--declaration-key", key,
                              "--disabled", "--agent", "tari", "--session", "isolated", *flags)
-        if not isinstance(result, dict) or not isinstance(result.get("id"), str):
+        # Pinned OpenClaw replies {"created"|"updated": true, "job": {...}}; a declaration-key upsert keeps the ID.
+        added = result.get("job") if isinstance(result, dict) else None
+        if not isinstance(added, dict) or not isinstance(added.get("id"), str):
             raise WorkflowError("Registration outcome is unknown; inspect native jobs before retrying", unknown=True)
-        job = self.job(result["id"], key)
+        job = self.job(added["id"], key)
         if job.get("enabled") is not False:
-            self.native("automations", "disable", result["id"])
-            job = self.job(result["id"], key)
+            self.native("automations", "disable", added["id"])
+            job = self.job(added["id"], key)
             if job.get("enabled") is not False:
                 raise WorkflowError("Unexpected active registration could not be disabled; inspect native scheduler status immediately")
         return job

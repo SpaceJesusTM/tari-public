@@ -4,8 +4,8 @@ Fresh installations have no scheduled brief or reminder jobs. These features use
 OpenClaw's native scheduler and delivery; Tari adds fixed-purpose commands rather
 than another scheduler. Heartbeat settings remain unchanged.
 
-After [initial setup](setup.md), an owner can install the workflow tools. Existing
-installations also need the updated workspace instructions:
+Fresh v0.1 installations already load the workflow tools. Installations created
+before v0.1 need them installed, plus the updated workspace instructions:
 
 ```sh
 ./tari automation setup
@@ -14,8 +14,8 @@ installations also need the updated workspace instructions:
 ```
 
 These commands update this installation's image/configuration and instructions;
-they create no jobs. Run them deliberately. Read-only on-demand briefs then use
-the same bounded context collector as scheduled briefs.
+they create no jobs. Run them deliberately. Read-only on-demand briefs use the
+same bounded context collector as scheduled briefs.
 
 Connect Discord using [native Discord setup](discord.md) first. Native pairing,
 allowlists, guild/channel admission and owner permissions still apply; there is
@@ -46,8 +46,10 @@ Repeating `enable` updates the same managed daily job, including an intentional
 change of time, timezone, model or destination; it does not create another daily
 brief. It also re-enables a stopped job. This registers future execution without
 an immediate test run. The defaults are `09:00`, the installation timezone,
-`openai/gpt-6.1-sol`, and `medium` thinking. The job has an empty fallback chain:
-an unavailable model is reported rather than silently promoting to another model.
+`openai/gpt-6.1-sol`, and `medium` thinking. The model and thinking level are
+stored on the native job, independent of the model used for ordinary chat. The
+job has an empty fallback chain: an unavailable model is reported rather than
+silently promoting to another model.
 
 Each morning run is isolated, has a 300-second budget and permits only
 `tari_brief_context` and, when installed and allowed, `dailygrad_digest`. It reads

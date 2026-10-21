@@ -72,12 +72,15 @@ function correctWorkspace(context) {
     && path.resolve(context.workspaceDir) === WORKSPACE;
 }
 
+/**
+ * Pinned OpenClaw sets senderIsOwner for admin-scoped Gateway operators (CLI/API/Control UI)
+ * and native channel owners only; paired or allowlisted chat participants are not owners.
+ */
 function reminderContextAllowed(context) {
   if (!correctWorkspace(context) || typeof context.assertInvocationCurrent !== "function") return false;
-  if (context.senderIsOwner === false) return false;
+  if (context.senderIsOwner !== true) return false;
   if (typeof context.sessionKey === "string" && /(?:^|:)(?:cron|subagent)(?::|$)/u.test(context.sessionKey)) return false;
-  if (context.messageChannel === undefined || context.messageChannel === "webchat") return true;
-  return context.messageChannel === "discord" && context.senderIsOwner === true;
+  return context.messageChannel === undefined || context.messageChannel === "webchat" || context.messageChannel === "discord";
 }
 
 function reminderError(code, message, unknown = false) {

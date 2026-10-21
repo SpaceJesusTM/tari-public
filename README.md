@@ -73,10 +73,11 @@ historical digests without a runner; optionally enable generation, repair, sourc
 preferences, and exercise controls through the constrained runner. Nothing runs on
 a schedule. [DailyGrad setup →](docs/dailygrad.md)
 
-**Discord & scheduled delivery.** Use OpenClaw's native pairing, guild allowlists,
-and channel conversations. Separately opt into morning briefs or deterministic
-reminders with an explicit destination. [Discord →](docs/discord.md)
-· [Briefs & reminders →](docs/automation.md)
+**Discord & scheduled delivery.** Install OpenClaw's official Discord plugin when
+you want it, then use native pairing, guild allowlists, and channel conversations.
+Separately opt into a morning brief (its own time, timezone, model, and thinking
+level, independent of chat) or deterministic reminders, each with an explicit
+destination. [Discord →](docs/discord.md) · [Briefs & reminders →](docs/automation.md)
 
 ## How it works
 
@@ -120,10 +121,12 @@ tokens are workflow checks, not independent proof of human approval. Imported ma
 documents, and digests remain untrusted content. See [SECURITY.md](SECURITY.md).
 
 PDF intake needs selectable text; OCR is not included. Semantic memory search needs
-an appropriate OpenClaw provider. All jobs and Discord connectivity start
-unconfigured. Scheduled delivery needs a running host/Gateway and separate live
-acceptance; voice integration is not included. Linux/WSL and amd64 runtime checks
-remain part of release acceptance.
+an appropriate OpenClaw provider. Discord starts uninstalled, and no background
+model work runs by default: no jobs, heartbeat off, autonomous skill learning off.
+Scheduled delivery needs a running host/Gateway. Live Discord delivery and
+model-backed scheduled briefs still need owner acceptance; voice integration is
+not included. Linux/WSL and amd64 runtime checks remain part of release acceptance.
+See [v0.1 readiness](docs/readiness.md) for what has been verified.
 
 ## Documentation
 
@@ -135,6 +138,7 @@ remain part of release acceptance.
 - [Optional morning briefs and reminders](docs/automation.md)
 - [Local API](docs/api.md)
 - [Security](SECURITY.md)
+- [Release readiness and owner acceptance](docs/readiness.md)
 
 ## Project Origins
 

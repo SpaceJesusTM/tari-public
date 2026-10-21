@@ -48,6 +48,36 @@ permission to retry. Direct standalone DailyGrad use can bypass this adapter's
 in-process locks; avoid running independent writers against the same data while
 the optional runner is active. Cooldown state resets when the owner restarts it.
 
+## Discord, scheduled briefs, and reminders
+
+- Discord is optional. Opting in installs OpenClaw's official `@openclaw/discord`
+  plugin from npm at the version matching the pinned Gateway, then uses its own
+  pairing, allowlists, guild/channel policy, and owner configuration. Tari adds no
+  separate access layer. Every
+  approved DM sender or authorized guild participant can talk to the agent and
+  reach whatever tools and private data its native tool policy and workspace
+  allow, including Gmail, Calendar, planner, documents, and DailyGrad results.
+  A channel allowlist decides who may talk to the bot; it does not isolate one
+  person's private information from another. Admit only people you trust with
+  that data, or restrict tools and use a separate agent/workspace for shared use.
+- Reminder create/list/cancel tools require OpenClaw's native owner identity
+  (`senderIsOwner`): an admin-scoped local operator or a Discord sender in
+  `commands.ownerAllowFrom`. They are withheld from other chat participants,
+  scheduled turns, and delegated child sessions. Reminder text is passed as a
+  fixed `printf` argument, never shell input, and delivery uses no model.
+- A scheduled brief runs in an isolated session limited to `tari_brief_context`
+  and an existing DailyGrad digest read, with no fallback model. Its output is
+  sent to the destination you chose; choose one appropriate for that content.
+- A registered job is not a delivered message. Check native history; ambiguous
+  outcomes are reported for inspection and never blindly retried. Cancelling or
+  disabling cannot recall a message already sent.
+- Sensitive-content filters on brief context and Discord outbound text block
+  high-confidence credentials and authentication/recovery content only. They are
+  defense in depth, not data-loss prevention: novel or obscured secrets can pass,
+  attachments are not inspected, and native hooks can fail open on error.
+- Fresh installations start with no enabled jobs, the heartbeat off, and native
+  autonomous skill learning off.
+
 Dependency pins preserve compatibility; periodically review official release
 notes and security advisories, update deliberately, and repeat tests. Source
 templates are not automatically applied over private runtime instructions.

@@ -1,7 +1,11 @@
-# v0 implementation and review notes
+# Historical v0 MVP notes
 
-These are the original MVP notes. For the current DailyGrad, briefing, timezone,
-and readiness pass, see [v0.1 readiness and owner acceptance](readiness.md).
+> **Historical record.** These notes describe the first MVP and are kept for
+> provenance. Several statements are no longer current: v0.1 adds the DailyGrad
+> read-only adapter and optional runner, optional native Discord, opt-in scheduled
+> morning briefs, and deterministic reminders, and its test counts differ. For
+> current functionality and verification, see [v0.1 readiness](readiness.md), the
+> [README](../README.md), and [briefs & reminders](automation.md).
 
 The candidate is an independently initialized public codebase. The existing MIT
 license and independent public Git history are preserved. Only selected tracked

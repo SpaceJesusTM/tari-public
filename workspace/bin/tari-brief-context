@@ -138,7 +138,7 @@ def collect(day="today", local_only=False, now=None, private_memory=False):
               "calendar_window": {"start": start.isoformat(), "end": end.isoformat()},
               "sources": {"domains": domains,
                   "preferences": note(root / "USER.md", root, 3000),
-                   "memory": note(root / "MEMORY.md", root, 4000) if private_memory else {"status": "not_requested"},
+                  "memory": note(root / "MEMORY.md", root, 4000) if private_memory else {"status": "not_requested"},
                   "planner": helper(root, "day-planner", ["show", chosen.isoformat(), "--json", "--no-calendar"])},
               "read_only": True, "untrusted_content": True,
               "instruction": "Synthesize an adaptive brief using available sources and source precedence. No writes or inferred commitments. Disclose unavailable and bounded sources."}

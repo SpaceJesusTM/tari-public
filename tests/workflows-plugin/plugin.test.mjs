@@ -6,7 +6,7 @@ import { BRIEF_HELPER, BRIEF_MAX_BYTES, BRIEF_TIMEOUT_MS, REMINDER_HELPER, REMIN
   from "../../plugins/tari-workflows/tools.js";
 
 const context = (changes = {}) => ({ agentId: "tari", workspaceDir: WORKSPACE,
-  sessionKey: "agent:tari:main", assertInvocationCurrent() {}, ...changes });
+  sessionKey: "agent:tari:main", senderIsOwner: true, assertInvocationCurrent() {}, ...changes });
 const document = (changes = {}) => ({ date: "2026-10-21", time_zone: "UTC", read_only: true,
   sources: {
     planner: { status: "available", quality: "complete", data: { schedule: [], checklist: [] } },
@@ -214,7 +214,8 @@ test("reminder factories permit trusted local operators and native Discord owner
     context({ messageChannel: "discord", senderIsOwner: true, sessionKey: "agent:tari:discord:channel:private-guild" })]) {
     assert.equal(registered.reminders(trusted).size, 3);
   }
-  for (const trusted of [context({ senderIsOwner: false }), context({ messageChannel: "webchat", senderIsOwner: false }),
+  for (const trusted of [context({ senderIsOwner: false }), context({ senderIsOwner: undefined }),
+    context({ messageChannel: "webchat", senderIsOwner: undefined }), context({ messageChannel: "webchat", senderIsOwner: false }),
     context({ messageChannel: "discord", senderIsOwner: false }),
     context({ messageChannel: "discord", senderIsOwner: undefined }), context({ messageChannel: "telegram", senderIsOwner: true }),
     context({ sessionKey: "agent:tari:cron:fixture", senderIsOwner: true }),

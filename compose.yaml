@@ -26,6 +26,8 @@ services:
     read_only: true
     tmpfs:
       - /tmp:rw,nosuid,nodev,size=268435456,mode=1777
+      # npm cache for explicit native plugin installs (for example Discord); installs persist in state.
+      - /home/node/.npm:rw,nosuid,nodev,size=268435456,mode=1777
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     stop_grace_period: 360s

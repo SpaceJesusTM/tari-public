@@ -82,7 +82,7 @@ class NativeScheduler:
             self.jobs[job_id] = deepcopy(job)
             if self.timeout_after_add:
                 raise subprocess.TimeoutExpired("fixture-native", 1)
-            return deepcopy(job)
+            return {"updated": True, "job": deepcopy(job)} if previous else {"created": True, "job": deepcopy(job)}
         if operation == ("automations", "show"):
             job = deepcopy(self.jobs.get(arguments[2]))
             return self.show_transform(job) if self.show_transform else job

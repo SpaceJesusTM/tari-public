@@ -5,7 +5,7 @@ import { containsSensitive, protectBrief, registerDiscordGuard, reminderText } f
 const secret = "ghp_" + "A".repeat(36);
 
 test("clear credentials, authentication codes and recovery links are sensitive", () => {
-  for (const value of [secret, "1//" + "a".repeat(30), "API_KEY=abcdefghijk12345", "Authorization: Bearer abcdefghijklmnop", "Your verification code", "Your backup codes", "Verification code: 123456", "Verification code: ABCD-EFGH", "Recovery codes: ABCD-EFGH", "Backup code: 4567-8901", "https://accounts.example.test/oauth/authorize?code=abcdef", "https://example.test/reset-password?ticket=abc", "Open https://example.test/login.", "https://example.test/callback?access_token=abcdef", "https://example.test/callback#access_token=abcdef", "-----BEGIN PRIVATE KEY-----\nexample"]) {
+  for (const value of [secret, "1//" + "a".repeat(30), "API_KEY=abcdefghijk12345", "Authorization: Bearer abcdefghijklmnop", "Your verification code", "Your backup codes", "Verification code: 123456", "Verification code: ABCD-EFGH", "Recovery codes: ABCD-EFGH", "Backup code: 4567-8901", "https://accounts.example.test/oauth/authorize?code=abcdef", "https://example.test/reset-password?ticket=abc", "Open https://example.test/login.", "https://example.test/callback?access_token=abcdef", "https://example.test/callback#access_token=abcdef", "-----BEGIN " + "PRIVATE KEY-----\nexample"]) {
     assert.equal(containsSensitive(value), true, value);
   }
 });
