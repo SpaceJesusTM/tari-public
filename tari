@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""Local Tari installation manager. Requires Python 3.10+."""
+from pathlib import Path
+import runpy
+
+runpy.run_path(str(Path(__file__).resolve().parent / "scripts" / "tari_cli.py"), run_name="__main__")

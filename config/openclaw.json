@@ -1,0 +1,34 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "/home/node/.openclaw/workspace",
+      "model": {"primary": "openai/gpt-6.1-sol"},
+      "userTimezone": "UTC",
+      "sandbox": {"mode": "off"}
+    },
+    "entries": {
+      "tari": {
+        "name": "Tari",
+        "workspace": "/home/node/.openclaw/workspace",
+        "identity": {"name": "Tari"},
+        "heartbeat": {"every": "0m"}
+      }
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "bind": "lan",
+    "port": 18789,
+    "auth": {
+      "mode": "token",
+      "token": {"source": "env", "provider": "default", "id": "OPENCLAW_GATEWAY_TOKEN"},
+      "rateLimit": {"maxAttempts": 10, "windowMs": 60000, "lockoutMs": 300000}
+    },
+    "http": {"endpoints": {"chatCompletions": {"enabled": true}}},
+    "controlUi": {"allowedOrigins": ["http://localhost:18899", "http://127.0.0.1:18899"]},
+    "tailscale": {"mode": "off"}
+  },
+  "tools": {"profile": "full", "fs": {"workspaceOnly": true}},
+  "plugins": {"entries": {"memory-core": {"enabled": true, "config": {"dreaming": {"enabled": false}}}}},
+  "telemetry": {"enabled": false}
+}
