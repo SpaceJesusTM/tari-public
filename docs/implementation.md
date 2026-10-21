@@ -1,5 +1,8 @@
 # v0 implementation and review notes
 
+These are the original MVP notes. For the current DailyGrad, briefing, timezone,
+and readiness pass, see [v0.1 readiness and owner acceptance](readiness.md).
+
 The candidate is an independently initialized public codebase. The existing MIT
 license and independent public Git history are preserved. Only selected tracked
 source instructions and the standalone planner were reviewed from private Tari;

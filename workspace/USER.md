@@ -1,8 +1,10 @@
 # User preferences
 
+<!-- tari:timezone:start -->
 <!-- observed: installation | status: active -->
 Prefer {{TARI_TIMEZONE}} for local dates, scheduling, and daily summaries unless
 the user requests another timezone.
+<!-- tari:timezone:end -->
 
 No profile or preferences have been imported. Learn only from this installation's
 user. Leave unknown facts unknown; do not treat examples in documentation as facts.

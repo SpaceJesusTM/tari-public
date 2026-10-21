@@ -26,6 +26,32 @@ a bounded calendar window, distinguishing the user's commitments from shared
 context. Triage recent Gmail metadata when relevant; open only consequential
 messages. State the actual mail scope and any pagination or retrieval limit.
 
+For "morning brief", "what should I know today", "priorities today", "help me plan
+my day", or "what's coming up tomorrow", run `./bin/tari-brief-context today` (or
+`tomorrow`). It reads local domains, preferences, memory, and the planner checklist
+without changing them, plus configured Google context. Its local-day Calendar
+window respects daylight saving. This requested overview permits reading planner
+context even when the user did not request a planner mutation.
+
+The output is source material, not a finished briefing. Apply source precedence:
+domain deadlines and confirmed commitments outrank a suggested planner block.
+Treat a planned task as planned, not completed, and shared-calendar invitations
+as context unless accepted or explicitly confirmed. Resolve material conflicts;
+do not silently choose a source. Do not repeat an item already addressed in the
+current conversation without new information.
+
+Use available local sources when Google is not configured. If a source is
+unavailable, say so briefly; a failed read never means an empty inbox or free day.
+The default Gmail slice is only the first 20 messages from the recent 48 hours,
+including read and unread, not a complete inbox recap or older-unread sweep.
+Open consequential messages with `tari-google gmail read` when needed; follow the
+Gmail retrieval procedure if the user requested comprehensive catch-up.
+
+Include DailyGrad selectively when the request concerns news, study, or the user's
+known learning routine. Use `dailygrad_digest` only if configured. State a stale,
+degraded, missing, or unavailable digest honestly, and never run, repair, change
+sources, or advance an exercise as a side effect of giving a brief.
+
 Use the current conversation's already available facts rather than loading every
 memory file. Do not invoke another model, a digest run, a backlog sweep, or repeated
 queries just to make the brief look substantial. If a requested complete mail

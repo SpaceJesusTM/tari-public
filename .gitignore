@@ -15,6 +15,7 @@
 !/scripts/
 !/tests/
 !/workspace/
+!/plugins/
 **/__pycache__/
 **/*.pyc
 **/.DS_Store

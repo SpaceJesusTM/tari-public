@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-ALLOWED_ROOTS = {"config", "docker", "docs", "examples", "scripts", "tests", "workspace"}
+ALLOWED_ROOTS = {"config", "docker", "docs", "examples", "scripts", "tests", "workspace", "plugins"}
 ALLOWED_FILES = {"LICENSE", "README.md", "SECURITY.md", ".gitignore", ".dockerignore", ".env.example", "compose.yaml", "tari"}
 RULES = {
     "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),

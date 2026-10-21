@@ -108,6 +108,10 @@ user confirmation. Deletion needs approval for that specific event. Tokens are a
 technical safeguard, not user consent. Readback must confirm the remote change;
 the wrapper never treats a proposal as a completed write.
 
+The agent can obtain and submit a proposal token itself. A matching token is a
+workflow check, not proof of independent human approval. Calendar writes stay
+disabled by default; this release does not add a separate human approval service.
+
 ## Expiry, storage, and disconnecting
 
 External OAuth apps in Testing issue seven-day refresh tokens for these user-data

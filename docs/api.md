@@ -37,3 +37,31 @@ untrusted content. Typed task tools can be added later with their own validation
 and authorization; this project does not yet expose a separate narrow task API.
 
 Contract checked against the [pinned OpenClaw HTTP API documentation](https://github.com/openclaw/openclaw/blob/v2026.9.9/docs/gateway/openai-http-api.md).
+
+## Timeouts, errors, and streaming
+
+The CLI and example client allow 660 seconds by default, enough for a long optional
+DailyGrad tool call plus response overhead. Override the CLI with
+`TARI_CHAT_TIMEOUT_SECONDS` in private `.local/runtime.env` (1–900 seconds), or the
+example with `--timeout`. Your backend/proxy must allow the same interval. A client
+timeout/disconnection is an unknown outcome: an authorized tool may still finish.
+Never blindly retry a request that can create an event, run DailyGrad, or advance
+an exercise. Inspect the relevant tool state first.
+
+Handle HTTP errors explicitly: 401 means missing/invalid authentication, 429 means
+rate limiting (respect `Retry-After`), 400 means an invalid request, and server or
+provider errors mean no verified answer. A health response proves liveness, not
+provider authentication or a successful chat. Keep raw diagnostic responses in
+owner-only logs and give users concise actionable errors.
+
+For streaming, set `"stream": true` in the same request and accept
+`text/event-stream`. Parse SSE `data:` records as Chat Completions chunks, append
+`choices[0].delta.content` when present, and finish on `data: [DONE]`. Empty deltas
+and tool work may produce long pauses. Test cancellation and partial-response
+handling in the voice backend; connection loss is not a confirmed rollback.
+The bundled client intentionally demonstrates the simpler non-streaming path.
+
+The stable agent route is `openclaw/tari`. Reusing `user` continues a session; it
+does not authenticate an end user. Enforce ownership of that opaque conversation
+identifier in the future backend. No additional API service or Boson component is
+included in this release.

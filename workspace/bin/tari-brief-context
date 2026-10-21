@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Read-only, bounded source collection for a requested brief; no scheduling or writes."""
+import argparse
+from datetime import date, datetime, time, timedelta, timezone
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+MAX_OUTPUT = 256 * 1024
+MAX_NOTES = 12
+
+
+def window(day, zone, now):
+    local = now.astimezone(zone).date()
+    chosen = local if day == "today" else local + timedelta(days=1) if day == "tomorrow" else date.fromisoformat(day)
+    start = datetime.combine(chosen, time.min, zone)
+    end = datetime.combine(chosen + timedelta(days=1), time.min, zone)
+    return chosen, start, end
+
+
+def safe(path, root):
+    if not path.is_relative_to(root) or ".." in path.relative_to(root).parts:
+        raise ValueError("Source path outside workspace")
+    for part in [root, *path.parents, path]:
+        if part.is_symlink():
+            raise ValueError("Source paths must not use symlinks")
+    return path
+
+
+def note(path, root, limit):
+    try:
+        safe(path, root)
+        if not path.exists():
+            return {"status": "absent", "source": str(path.relative_to(root))}
+        with path.open(encoding="utf-8") as handle:
+            text = handle.read(limit + 1)
+        return {"status": "available", "source": str(path.relative_to(root)),
+                "text": text[:limit], "truncated": len(text) > limit, "untrusted_content": True}
+    except (OSError, ValueError):
+        return {"status": "unavailable", "source": str(path.relative_to(root)), "reason": "Source could not be read safely"}
+
+
+def helper(root, name, args):
+    try:
+        tool = safe(root / "bin" / name, root)
+        result = subprocess.run([sys.executable, str(tool), *args], cwd=root, capture_output=True,
+                                text=True, timeout=65, check=False)
+        if result.returncode or len(result.stdout.encode()) > MAX_OUTPUT:
+            raise ValueError()
+        data = json.loads(result.stdout)
+        if not isinstance(data, dict):
+            raise ValueError()
+        return {"status": "available", "data": data, "untrusted_content": True}
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return {"status": "unavailable", "reason": "Source retrieval failed; do not infer it is empty"}
+
+
+def collect(day="today", local_only=False, now=None):
+    root = Path(os.environ.get("TARI_WORKSPACE", Path(__file__).absolute().parent.parent)).absolute()
+    zone_name = os.environ.get("TARI_TIMEZONE") or "UTC"
+    try:
+        zone = ZoneInfo(zone_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError("Invalid TARI_TIMEZONE; set a valid IANA timezone with ./tari timezone ZONE") from None
+    now = now or datetime.now(timezone.utc)
+    chosen, start, end = window(day, zone, now)
+    notes = []
+    try:
+        directory = safe(root / "domains", root)
+        paths = sorted(directory.glob("*.md")) if directory.is_dir() else []
+        notes = [note(path, root, 3000) for path in paths[:MAX_NOTES]]
+        domains = {"status": "available", "files": notes, "truncated": len(paths) > MAX_NOTES}
+    except (OSError, ValueError):
+        domains = {"status": "unavailable", "reason": "Domain directory unavailable"}
+    result = {"date": chosen.isoformat(), "time_zone": zone_name, "as_of": now.astimezone(zone).isoformat(),
+              "calendar_window": {"start": start.isoformat(), "end": end.isoformat()},
+              "sources": {"domains": domains,
+                  "preferences": note(root / "USER.md", root, 3000),
+                  "memory": note(root / "MEMORY.md", root, 4000),
+                  "planner": helper(root, "day-planner", ["show", chosen.isoformat(), "--json", "--no-calendar"])},
+              "read_only": True, "untrusted_content": True,
+              "instruction": "Synthesize an adaptive brief using available sources and source precedence. No writes or inferred commitments. Disclose unavailable and bounded sources."}
+    sources = result["sources"]
+    sources["planner"]["scope"] = "Local blocks/checklist only; Calendar is collected separately"
+    configured = bool(os.environ.get("TARI_GOOGLE_ACCOUNT") or os.environ.get("GOG_ACCOUNT"))
+    if local_only or not configured:
+        status = "not_requested" if local_only else "not_configured"
+        sources["calendar"] = {"status": status}
+        sources["gmail"] = {"status": status}
+    else:
+        sources["calendar"] = helper(root, "tari-google", ["calendar", "list", "--start", start.isoformat(), "--end", end.isoformat(), "--json"])
+        # Epoch bounds avoid Gmail's timezone-dependent date-only query semantics.
+        lower, upper = int((now - timedelta(days=2)).timestamp()), int(now.timestamp()) + 1
+        query = f"after:{lower} before:{upper}"
+        sources["gmail"] = helper(root, "tari-google", ["gmail", "search", query, "--max", "20"])
+        sources["gmail"]["scope"] = {"query": query, "max_messages": 20, "complete_inbox_recap": False,
+                                      "description": "Recent 48 hours, first bounded page, read and unread"}
+        envelope = sources["gmail"].get("data", {}).get("data", {})
+        if isinstance(envelope, dict) and envelope.get("nextPageToken"):
+            sources["gmail"]["pagination_remaining"] = True
+    # DailyGrad is deliberately selective and never generated by a briefing read.
+    sources["dailygrad"] = {"status": "not_requested", "guidance": "If DailyGrad is relevant and configured, use dailygrad_digest only; do not run or repair it"}
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("day", nargs="?", default="today")
+    parser.add_argument("--local-only", action="store_true")
+    args = parser.parse_args()
+    try:
+        print(json.dumps(collect(args.day, args.local_only), ensure_ascii=False))
+        return 0
+    except (OSError, ValueError) as error:
+        print(json.dumps({"error": str(error), "read_only": True}), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

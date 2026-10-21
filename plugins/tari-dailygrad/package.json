@@ -1,0 +1,17 @@
+{
+  "name": "tari-public-dailygrad",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Optional DailyGrad digest and constrained runner tools for Tari Public.",
+  "peerDependencies": {
+    "openclaw": ">=2026.9.5"
+  },
+  "openclaw": {
+    "extensions": ["./index.js"],
+    "compat": {
+      "pluginApi": ">=2026.9.5",
+      "minGatewayVersion": "2026.9.5"
+    }
+  }
+}

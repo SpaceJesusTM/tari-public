@@ -1,5 +1,6 @@
 """Small local launcher; no global OpenClaw installation or state is consulted."""
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,8 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
+from types import SimpleNamespace
 import urllib.error
 import urllib.request
 import uuid
@@ -40,7 +43,35 @@ def private_write(path, data):
     path.chmod(0o600)
 
 
-def read_env():
+def private_replace(path, data, mode=0o600):
+    """Replace one installation file atomically, using a same-directory temp file."""
+    path = safe(path)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor, temporary = tempfile.mkstemp(prefix=".tari-write-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            os.fchmod(stream.fileno(), mode)
+            stream.write(data.encode() if isinstance(data, str) else data)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def exact_text(path):
+    with safe(path).open(encoding="utf-8", newline="") as stream:
+        return stream.read()
+
+
+def validate_timezone(zone):
+    try:
+        ZoneInfo(zone)
+    except (ValueError, ZoneInfoNotFoundError):
+        raise ValueError("Use a valid IANA timezone, such as UTC or Europe/London") from None
+    return zone
+
+
+def read_env(validate_zone=True):
     path = safe(LOCAL / "runtime.env")
     if not path.exists():
         raise ValueError("Run ./tari init first")
@@ -57,11 +88,14 @@ def read_env():
     port = int(result.get("TARI_PORT", "18899"))
     if not 1024 <= port <= 65535:
         raise ValueError("TARI_PORT must be 1024..65535")
+    result.setdefault("TARI_TIMEZONE", "UTC")
+    if validate_zone:
+        validate_timezone(result["TARI_TIMEZONE"])
     return result
 
 
 def initialize(args):
-    ZoneInfo(args.timezone)
+    validate_timezone(args.timezone)
     if not 1024 <= args.port <= 65535:
         raise ValueError("Port must be 1024..65535")
     if not re.fullmatch(r"[A-Za-z0-9 _-]{1,60}", args.name):
@@ -111,20 +145,200 @@ def initialize(args):
     print("Add your model API key to .local/runtime.env, then ./tari start")
 
 
-def compose(*args):
-    env = read_env()
+def compose_invocation(*args, validate_zone=True):
+    env = read_env(validate_zone=validate_zone)
     project = env.get("COMPOSE_PROJECT_NAME", "")
     if not re.fullmatch(r"tari-public-[a-f0-9]{12}", project):
         raise ValueError("Invalid private Compose project identifier")
     # Do not inherit caller Compose overrides or provider/production credentials.
     process_env = {key: value for key, value in os.environ.items() if not key.startswith(("COMPOSE_", "OPENCLAW_", "GOG_", "TARI_"))}
     process_env.update(env)
-    command = ["docker", "compose", "--project-directory", str(ROOT), "--env-file", str(LOCAL / "runtime.env"), "-f", str(ROOT / "compose.yaml"), "-p", project, *args]
+    command = ["docker", "compose", "--project-directory", str(ROOT), "--env-file", str(LOCAL / "runtime.env"), "-f", str(ROOT / "compose.yaml")]
+    dailygrad = dailygrad_cli()
+    if dailygrad and hasattr(dailygrad, "compose_files"):
+        for overlay in dailygrad.compose_files(SimpleNamespace(**globals())):
+            command.extend(["-f", str(safe(overlay))])
+    command.extend(["-p", project, *args])
+    return command, process_env
+
+
+def compose(*args):
+    command, process_env = compose_invocation(*args)
     return subprocess.call(command, cwd=ROOT, env=process_env)
+
+
+def running_service(service="tari"):
+    """True/False for this installation only; None if Docker cannot answer."""
+    if service not in {"tari", "dailygrad-runner"}:
+        raise ValueError("Unknown installation service")
+    if not shutil.which("docker"):
+        return None
+    profile = ["--profile", "dailygrad-runner"] if service == "dailygrad-runner" else []
+    command, process_env = compose_invocation(*profile, "ps", "--status", "running", "-q", service, validate_zone=False)
+    try:
+        result = subprocess.run(command, cwd=ROOT, env=process_env, capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return bool(result.stdout.strip()) if result.returncode == 0 else None
+
+
+def recreate_running(service="tari"):
+    """Apply settings only to a running service; None means no restart attempted."""
+    if running_service(service) is True:
+        profile = ["--profile", "dailygrad-runner"] if service == "dailygrad-runner" else []
+        return compose(*profile, "up", "-d", "--no-build", "--force-recreate", service)
+    return None
+
+
+def timezone_user_text(text, zone):
+    """Change only our explicit managed stanza; retain the user's other notes."""
+    newline = "\r\n" if "\r\n" in text else "\n"
+    directive = newline.join([
+        f"Prefer {zone} for local dates, scheduling, and daily summaries unless",
+        "the user requests another timezone.",
+    ])
+    directive_pattern = (r"Prefer [A-Za-z0-9_+./-]+ for local dates, scheduling, and daily summaries unless\r?\n"
+                         r"the user requests another timezone\.")
+    stanza = newline.join([
+        "<!-- tari:timezone:start -->",
+        "<!-- observed: installation | status: active -->",
+        directive,
+        "<!-- tari:timezone:end -->",
+    ])
+    start, end = "<!-- tari:timezone:start -->", "<!-- tari:timezone:end -->"
+    if start in text or end in text:
+        if text.count(start) != 1 or text.count(end) != 1 or text.index(end) < text.index(start):
+            raise ValueError("USER.md has an incomplete timezone marker; repair it before changing timezone")
+        lo, hi = text.index(start) + len(start), text.index(end)
+        body, count = re.subn(directive_pattern, lambda _: directive, text[lo:hi], count=1)
+        if not count:
+            body += ("" if body.endswith("\n") else newline) + directive + newline
+        return text[:lo] + body + text[hi:]
+    legacy = (r"<!-- observed: installation \| status: active -->\r?\n"
+              r"Prefer [A-Za-z0-9_+./-]+ for local dates, scheduling, and daily summaries unless\r?\n"
+              r"the user requests another timezone\.")
+    updated, count = re.subn(legacy, lambda _: stanza, text, count=1)
+    if count:
+        return updated
+    separator = "" if not text else (newline if text.endswith(("\n", "\r")) else newline * 2)
+    return text + separator + stanza + newline
+
+
+def configure_timezone(zone=None):
+    if zone is not None:
+        validate_timezone(zone)  # Fail before reading or writing installation files.
+    env = read_env(validate_zone=zone is None)
+    if zone is None:
+        print(env["TARI_TIMEZONE"])
+        return 0
+    env_path = safe(LOCAL / "runtime.env")
+    env_text = exact_text(env_path)
+    key = "TARI_TIMEZONE=" + zone
+    if re.search(r"(?m)^TARI_TIMEZONE=", env_text):
+        updated_env = re.sub(r"(?m)^TARI_TIMEZONE=[^\r\n]*", lambda _: key, env_text)
+    else:
+        newline = "\r\n" if "\r\n" in env_text else "\n"
+        updated_env = env_text + ("" if not env_text or env_text.endswith("\n") else newline) + key + newline
+    config_path = safe(LOCAL / "state/openclaw.json")
+    if not config_path.is_file():
+        raise ValueError("Missing installation configuration; run ./tari init first")
+    config = json.loads(config_path.read_text())
+    if not isinstance(config, dict) or not isinstance(config.get("agents", {}), dict):
+        raise ValueError("OpenClaw configuration and agents must be objects")
+    defaults = config.setdefault("agents", {}).setdefault("defaults", {})
+    if not isinstance(defaults, dict):
+        raise ValueError("OpenClaw agents.defaults must be an object")
+    defaults["userTimezone"] = zone
+    plugins = config.get("plugins", {})
+    if not isinstance(plugins, dict) or not isinstance(plugins.get("entries", {}), dict):
+        raise ValueError("OpenClaw plugins.entries must be an object")
+    dailygrad = plugins.get("entries", {}).get("tari-dailygrad")
+    if dailygrad is not None:
+        if not isinstance(dailygrad, dict) or not isinstance(dailygrad.get("config", {}), dict):
+            raise ValueError("DailyGrad plugin configuration must be an object")
+        dailygrad.setdefault("config", {})["timeZone"] = zone
+    user_path = safe(LOCAL / "state/workspace/USER.md")
+    user_text = exact_text(user_path) if user_path.exists() else "# User preferences\n"
+    updated_user = timezone_user_text(user_text, zone)
+    # All parsing and path checks happen before the first write. No secrets are printed.
+    running = running_service()
+    dailygrad_enabled = dailygrad is not None and dailygrad.get("enabled") is True \
+        and dailygrad.get("config", {}).get("enabled", True) is not False
+    runner_running = running_service("dailygrad-runner") if dailygrad_enabled else False
+    changes = [(env_path, updated_env), (config_path, json.dumps(config, indent=2) + "\n"),
+               (user_path, updated_user)]
+    for path, content in changes:
+        if not path.exists() or exact_text(path) != content:
+            private_replace(path, content)
+    result = 0
+    if running:
+        result = compose("up", "-d", "--no-build", "--force-recreate", "tari")
+        if result:
+            print(f"Saved timezone {zone}; container recreation failed. Retry ./tari timezone {zone}.", file=sys.stderr)
+        else:
+            print(f"Timezone: {zone}. Recreated the running Tari container.")
+    elif running is False:
+        print(f"Timezone: {zone}. The stopped container will use it on ./tari start.")
+    else:
+        print(f"Timezone: {zone}. Docker status unavailable; ./tari start will apply it to the container.")
+    if runner_running:
+        runner_result = compose("--profile", "dailygrad-runner", "up", "-d", "--no-build", "--force-recreate", "dailygrad-runner")
+        if runner_result:
+            print(f"Saved timezone {zone}; optional runner recreation failed. Retry ./tari timezone {zone}.", file=sys.stderr)
+        else:
+            print("Recreated the running DailyGrad runner with the configured timezone; no DailyGrad job was requested.")
+        result = result or runner_result
+    return result
+
+
+def workspace_update(instructions=False):
+    """Refresh distributed helpers and skills, leaving personal state alone."""
+    read_env()  # Require an existing installation; do not create one implicitly.
+    template = safe(ROOT / "workspace")
+    candidates = []
+    for section in ("bin", "skills"):
+        directory = safe(template / section)
+        if directory.exists():
+            for source in sorted(directory.rglob("*")):
+                safe(source)
+                if source.is_file():
+                    candidates.append(source)
+    if instructions:
+        candidates.extend(safe(template / name) for name in ("AGENTS.md", "SOUL.md", "TOOLS.md", "HEARTBEAT.md")
+                          if safe(template / name).is_file())
+    updates = []
+    for source in candidates:
+        target = safe(LOCAL / "state/workspace" / source.relative_to(template))
+        if target.exists() and not target.is_file():
+            raise ValueError("A workspace update target is not a file")
+        data = source.read_bytes()
+        mode = 0o700 if source.parent.name == "bin" else 0o600
+        if not target.exists() or target.read_bytes() != data or target.stat().st_mode & 0o777 != mode:
+            updates.append((target, data, mode))
+    for target, data, mode in updates:
+        private_replace(target, data, mode)
+    print(f"Updated {len(updates)} distributed workspace files. Personal state and user-added files preserved.")
+    if instructions:
+        print("Replaced AGENTS.md, SOUL.md, TOOLS.md, and HEARTBEAT.md from this checkout's templates.")
+    return 0
+
+
+def dailygrad_cli():
+    path = safe(ROOT / "scripts/dailygrad_setup.py")
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("tari_dailygrad_setup", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def chat_request(message, session, env=None):
     env = env or read_env()
+    timeout = int(env.get("TARI_CHAT_TIMEOUT_SECONDS", "660"))
+    if not 1 <= timeout <= 900:
+        raise ValueError("TARI_CHAT_TIMEOUT_SECONDS must be 1..900")
     payload = {"model": "openclaw/tari", "user": session, "messages": [{"role": "user", "content": message}]}
     request = urllib.request.Request(
         f"http://127.0.0.1:{env['TARI_PORT']}/v1/chat/completions",
@@ -134,7 +348,7 @@ def chat_request(message, session, env=None):
     # Ignore proxy environment settings for local credentials.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with opener.open(request, timeout=300) as response:
+        with opener.open(request, timeout=timeout) as response:
             result = json.load(response)
         try:
             content = result["choices"][0]["message"]["content"]
@@ -165,7 +379,19 @@ def doctor():
     for rel in ["state/openclaw.json", "state/workspace/AGENTS.md", "state/workspace/bin/day-planner"]:
         if not safe(LOCAL / rel).is_file():
             failures.append("Missing runtime file: " + rel)
+    config_path = safe(LOCAL / "state/openclaw.json")
+    if config_path.is_file():
+        try:
+            config = json.loads(config_path.read_text())
+            if config.get("agents", {}).get("defaults", {}).get("userTimezone") != env["TARI_TIMEZONE"]:
+                failures.append("OpenClaw timezone differs from TARI_TIMEZONE; run ./tari timezone " + env["TARI_TIMEZONE"])
+            dailygrad = config.get("plugins", {}).get("entries", {}).get("tari-dailygrad")
+            if dailygrad and dailygrad.get("config", {}).get("timeZone") != env["TARI_TIMEZONE"]:
+                failures.append("DailyGrad timezone differs from TARI_TIMEZONE; run ./tari timezone " + env["TARI_TIMEZONE"])
+        except (ValueError, AttributeError):
+            failures.append("Installation configuration is not valid JSON object configuration")
     print("Private state: .local/ | agent: tari | loopback port: " + env["TARI_PORT"])
+    print("Timezone: " + env["TARI_TIMEZONE"] + " (TARI_TIMEZONE; default UTC)")
     print("Google account configured: " + ("yes" if env.get("TARI_GOOGLE_ACCOUNT") else "no (optional)"))
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -189,6 +415,14 @@ def main():
     init.add_argument("--model", default="openai/gpt-6.1-sol")
     init.add_argument("--name", default="Tari")
     init.add_argument("--port", type=int, default=18899)
+    timezone_parser = sub.add_parser("timezone", help="Show or change the installation's IANA timezone (default UTC)")
+    timezone_parser.add_argument("zone", nargs="?")
+    update_parser = sub.add_parser("workspace-update", help="Replace distributed helpers and skills; preserve personal state")
+    update_parser.add_argument("--instructions", action="store_true",
+                               help="Also replace AGENTS.md, SOUL.md, TOOLS.md and HEARTBEAT.md templates")
+    dailygrad = dailygrad_cli()
+    if dailygrad:
+        dailygrad.register_parser(sub)
     for name in ["build", "start", "stop", "status", "logs", "doctor", "token"]:
         sub.add_parser(name)
     chat = sub.add_parser("chat", help="Interactive chat; /quit exits")
@@ -200,6 +434,12 @@ def main():
     args = parser.parse_args()
     if args.command == "init":
         initialize(args)
+    elif args.command == "timezone":
+        return configure_timezone(args.zone)
+    elif args.command == "workspace-update":
+        return workspace_update(args.instructions)
+    elif args.command == "dailygrad":
+        return dailygrad.dispatch(args, SimpleNamespace(**globals()))
     elif args.command == "doctor":
         return doctor()
     elif args.command == "token":
@@ -230,7 +470,7 @@ def main():
             print(f"No {key_name} in .local/runtime.env; chat needs your provider credentials.", file=sys.stderr)
         return compose("up", "-d", "--build", "tari")
     else:
-        commands = {"build": ["build", "tari"], "stop": ["down", "--timeout", "360"], "status": ["ps"], "logs": ["logs", "--tail", "100", "tari"]}
+        commands = {"build": ["build", "tari"], "stop": ["down", "--remove-orphans", "--timeout", "360"], "status": ["ps"], "logs": ["logs", "--tail", "100", "tari"]}
         return compose(*commands[args.command])
     return 0
 

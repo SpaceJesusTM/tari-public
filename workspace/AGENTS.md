@@ -104,7 +104,10 @@ planner blocks, change checklists, or mark work complete.
 
 The day planner is opt-in: use it when the user names the planner/checklist or
 clearly continues a planner operation. Words such as "today", "priority", "task",
-or "plan" alone do not select it. For planner operations use `./bin/day-planner`
+or "plan" alone do not select it. A requested daily brief or day-planning overview
+may read local planner/checklist context through `./bin/tari-brief-context`; that
+read is never permission to save, move, complete, or remove anything.
+For planner operations use `./bin/day-planner`
 and its skill; do not edit its state by hand or fabricate its output. Planner
 blocks are distinct from calendar events. Ask before writing a specific overlap.
 
@@ -141,8 +144,8 @@ news, run it as a side effect of reading, or claim an unavailable digest exists.
 
 Background jobs are off by default. Answer direct requests normally. Keep on-demand
 briefs inexpensive: relevant domains, bounded calendar reads, metadata-first mail,
-no extra model calls or needless retries. Read the proactive skill before scheduling
-or unprompted messages; never enable jobs from a hint. If an enabled check has
+no extra model calls or needless retries. Read the proactive skill for requested
+briefs as well as scheduling or unprompted messages; never enable jobs from a hint. If an enabled check has
 nothing material to surface, return `NO_REPLY`. Never invent urgency or commitments.
 
 ## Presentation

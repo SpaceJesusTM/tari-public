@@ -1,0 +1,50 @@
+{
+  "id": "tari-dailygrad",
+  "name": "Tari DailyGrad",
+  "description": "Adds dailygrad_digest (read the DailyGrad digest), dailygrad_run (ask the host runner for a new run), dailygrad_repair (ask the host runner to complete a degraded digest as a new revision of its run, with the same stories), dailygrad_sources / dailygrad_sources_update (list and change DailyGrad's news sources through the host runner), and dailygrad_leetcode (read and switch DailyGrad's LeetCode hint preference, and complete or move on from its current LeetCode exercise, through the host runner).",
+  "categories": [
+    "other"
+  ],
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "dailygrad_digest",
+      "dailygrad_run",
+      "dailygrad_repair",
+      "dailygrad_sources",
+      "dailygrad_sources_update",
+      "dailygrad_leetcode"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "dataDir": {
+        "type": "string"
+      },
+      "enabled": {
+        "type": "boolean",
+        "default": false
+      },
+      "allowRun": { "type": "boolean", "default": false },
+      "allowRepair": { "type": "boolean", "default": false },
+      "allowSourcesUpdate": { "type": "boolean", "default": false },
+      "allowLeetcodeUpdate": { "type": "boolean", "default": false },
+      "timeZone": {
+        "type": "string",
+        "description": "Installation IANA timezone, configured from TARI_TIMEZONE."
+      },
+      "runnerSocket": {
+        "type": ["string", "null"]
+      },
+      "runWaitSeconds": {
+        "type": "integer",
+        "minimum": 60,
+        "maximum": 570
+      }
+    }
+  }
+}

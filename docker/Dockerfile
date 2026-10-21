@@ -19,4 +19,5 @@ RUN set -eu; \
     tar -xzf /tmp/gog.tar.gz -C /tmp/gog-extract; \
     install -m 0755 /tmp/gog-extract/gog /usr/local/bin/gog; \
     rm -rf /tmp/gog-extract /tmp/gog.tar.gz
+RUN install -d -m 1777 /run/tari-dailygrad
 USER node

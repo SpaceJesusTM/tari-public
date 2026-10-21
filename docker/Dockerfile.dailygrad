@@ -1,0 +1,9 @@
+# Optional runner. Installs the standalone upstream project, never a local checkout.
+FROM python:3.12-slim-bookworm
+ARG DAILYGRAD_COMMIT=814b2bf88a14c164f455e9fbaa8473a8df516072
+RUN pip install --no-cache-dir "https://github.com/SpaceJesusTM/dailygrad/archive/${DAILYGRAD_COMMIT}.tar.gz"
+RUN install -d -m 1777 /run/tari-dailygrad && mkdir -p /opt/dailygrad /var/lib/tari-dailygrad
+COPY scripts/dailygrad_runner.py /opt/tari/dailygrad_runner.py
+WORKDIR /opt/dailygrad
+ENV HOME=/tmp XDG_CACHE_HOME=/tmp/cache PYTHONDONTWRITEBYTECODE=1
+ENTRYPOINT ["python3", "/opt/tari/dailygrad_runner.py"]

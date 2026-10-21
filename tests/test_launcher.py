@@ -25,6 +25,9 @@ class LauncherTests(unittest.TestCase):
         (self.root / "workspace/IDENTITY.md").write_text("{{TARI_NAME}}")
         (self.root / "workspace/USER.md").write_text("{{TARI_TIMEZONE}}")
         (self.root / "workspace/bin/tool").write_text("#!/bin/sh\nexit 0\n")
+        (self.root / "workspace/skills/example").mkdir(parents=True)
+        (self.root / "workspace/skills/example/SKILL.md").write_text("Example skill v1\n")
+        (self.root / "workspace/AGENTS.md").write_text("Distributed agent instructions\n")
         self.patches = [patch.object(cli, "ROOT", self.root), patch.object(cli, "LOCAL", self.root / ".local")]
         for item in self.patches:
             item.start()
@@ -97,6 +100,90 @@ class LauncherTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.initialize()
         self.assertFalse((self.root / ".local").exists())
+
+    def test_workspace_update_refreshes_code_skills_and_preserves_personal_files(self):
+        self.initialize()
+        runtime = self.root / ".local/state/workspace"
+        protected = {
+            "USER.md": "User's own notes\n", "IDENTITY.md": "Custom identity\n",
+            "MEMORY.md": "Remembered facts\n", "AGENTS.md": "Custom instructions\n",
+            "domains/work.md": "Private work state\n", "planner/checklist.md": "Private tasks\n",
+            "bin/user-tool": "User's own executable\n", "skills/custom/SKILL.md": "Custom skill\n",
+        }
+        for name, data in protected.items():
+            path = runtime / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(data)
+        (self.root / "workspace/bin/tool").write_text("#!/bin/sh\nexit 1\n")
+        (self.root / "workspace/skills/example/SKILL.md").write_text("Example skill v2\n")
+        env_before = (self.root / ".local/runtime.env").read_bytes()
+        with patch("builtins.print"):
+            self.assertEqual(cli.workspace_update(), 0)
+        self.assertEqual((runtime / "bin/tool").read_text(), "#!/bin/sh\nexit 1\n")
+        self.assertEqual((runtime / "skills/example/SKILL.md").read_text(), "Example skill v2\n")
+        self.assertEqual((runtime / "bin/tool").stat().st_mode & 0o777, 0o700)
+        for name, data in protected.items():
+            self.assertEqual((runtime / name).read_text(), data)
+        self.assertEqual((self.root / ".local/runtime.env").read_bytes(), env_before)
+        with patch("builtins.print") as output:
+            cli.workspace_update()
+        self.assertIn("Updated 0", output.call_args_list[0].args[0])
+
+    def test_workspace_update_instructions_require_explicit_flag(self):
+        self.initialize()
+        runtime = self.root / ".local/state/workspace"
+        (runtime / "AGENTS.md").write_text("Custom instructions")
+        with patch("builtins.print"):
+            cli.workspace_update(instructions=True)
+        self.assertEqual((runtime / "AGENTS.md").read_text(), "Distributed agent instructions\n")
+
+    def test_workspace_update_rejects_symlink_before_any_write(self):
+        self.initialize()
+        runtime = self.root / ".local/state/workspace"
+        before = (runtime / "bin/tool").read_bytes()
+        (self.root / "workspace/bin/tool").write_text("New source")
+        (runtime / "skills/example/SKILL.md").unlink()
+        (runtime / "skills/example/SKILL.md").symlink_to(runtime / "USER.md")
+        with self.assertRaisesRegex(ValueError, "Symlink"):
+            cli.workspace_update()
+        self.assertEqual((runtime / "bin/tool").read_bytes(), before)
+
+    def test_dailygrad_parser_registration_and_dispatch(self):
+        self.initialize()
+        (self.root / "scripts").mkdir()
+        (self.root / "scripts/dailygrad_setup.py").write_text(
+            "def register_parser(sub):\n    sub.add_parser('dailygrad')\n"
+            "def dispatch(args, cli):\n    assert cli.LOCAL.name == '.local'\n    return 7\n")
+        with patch("sys.argv", ["tari", "dailygrad"]):
+            self.assertEqual(cli.main(), 7)
+
+    def test_compose_adds_only_checkout_local_dailygrad_overlay(self):
+        self.initialize()
+        (self.root / "scripts").mkdir()
+        (self.root / "scripts/dailygrad_setup.py").write_text(
+            "def compose_files(cli):\n    return [cli.LOCAL / 'dailygrad/compose.json']\n")
+        with patch.object(cli.subprocess, "call", return_value=0) as run:
+            cli.compose("ps")
+        command = run.call_args.args[0]
+        overlays = [command[index + 1] for index, value in enumerate(command) if value == "-f"]
+        self.assertEqual(overlays, [str(self.root / "compose.yaml"), str(self.root / ".local/dailygrad/compose.json")])
+        (self.root / "scripts/dailygrad_setup.py").write_text(
+            "def compose_files(cli):\n    return [cli.ROOT.parent / 'outside.json']\n")
+        with self.assertRaisesRegex(ValueError, "inside this checkout"):
+            cli.compose_invocation("ps")
+
+    def test_recreate_running_does_not_start_stopped_installation(self):
+        with patch.object(cli, "running_service", return_value=False), patch.object(cli, "compose") as compose:
+            self.assertIsNone(cli.recreate_running())
+        compose.assert_not_called()
+        with patch.object(cli, "running_service", return_value=True), patch.object(cli, "compose", return_value=0) as compose:
+            self.assertEqual(cli.recreate_running(), 0)
+        compose.assert_called_once_with("up", "-d", "--no-build", "--force-recreate", "tari")
+
+    def test_stop_removes_only_this_compose_projects_orphan_services(self):
+        with patch("sys.argv", ["tari", "stop"]), patch.object(cli, "compose", return_value=0) as compose:
+            self.assertEqual(cli.main(), 0)
+        compose.assert_called_once_with("down", "--remove-orphans", "--timeout", "360")
 
 
 if __name__ == "__main__":

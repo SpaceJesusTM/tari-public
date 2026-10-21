@@ -1,4 +1,4 @@
-# Tari Public
+# Tari Public v0.1
 
 **Thoughtful Assistant for Routine & Information.** A portable personal assistant for
 email, schedules, documents, and the work you want to get done. Run your own instance
@@ -18,9 +18,12 @@ flowchart LR
     Tari --> State[Private memory and planner]
     Tari --> Docs[Imported documents with provenance]
     Tari --> Google[gog: read-only Gmail and guarded Calendar]
+    Tari --> DG[Optional DailyGrad plugin]
+    DG --> Digest[Read-only digest data]
+    DG --> Runner[Constrained optional runner]
 ```
 
-Included in v0:
+Included in the core installation:
 
 - Local chat with persistent conversation identifiers; no Discord requirement.
 - Editable identity, preferences, domain notes, and user-authorized memory.
@@ -28,7 +31,13 @@ Included in v0:
 - Calendar reads; optional proposal-based writes verified by reading the event back.
 - Planner blocks, commute blocks, free-time checks, tasks, and checklists, independent of Calendar.
 - Text, Markdown, text-based PDF, and basic DOCX intake with source hashes and timestamps.
-- On-demand daily briefing instructions and a local API for future clients.
+- On-demand daily briefs with bounded source collection and honest missing-source reporting.
+- Configurable IANA timezone with one command to change it across the installation.
+- An authenticated local API for future clients.
+
+After optional [DailyGrad setup](docs/dailygrad.md), six tools provide digest history,
+generation, repair, source preferences, and LeetCode exercise status/progress. Its data
+and runner can be completely absent without preventing ordinary Tari use.
 
 The runtime pins **OpenClaw 2026.9.9** and **gog 0.40.0**, matching the reusable source
 implementation. The thin Docker overlay uses the upstream prebuilt image and verifies
@@ -43,7 +52,7 @@ use the same commands. Run these commands inside this checkout, not a shared par
 ```sh
 git clone https://github.com/SpaceJesusTM/tari-public.git
 cd tari-public
-./tari init --timezone America/Toronto
+./tari init --timezone UTC
 ```
 
 Edit **`.local/runtime.env`** and set `OPENAI_API_KEY` to your own API key. The default
@@ -55,8 +64,11 @@ model is `openai/gpt-6.1-sol`; choose another compatible provider/model at initi
 
 Choose initialization options on the **first run**. Initialization only creates missing
 files: it never overwrites an existing installation or rotates its secrets. For an existing
-installation, edit the model/timezone/name in both `.local/runtime.env` and
-`.local/state/openclaw.json`; edit the private workspace profile to match. Provider keys
+installation, change timezone with `./tari timezone Europe/Berlin`; this synchronizes
+the runtime environment, OpenClaw configuration, managed user timezone, and optional
+DailyGrad settings. It recreates running services and leaves stopped ones stopped.
+For model/name changes, edit `.local/runtime.env` and
+`.local/state/openclaw.json`; edit the private identity to match. Provider keys
 are runtime environment entries: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENROUTER_API_KEY`.
 Other OpenClaw providers can be configured using `./tari openclaw models --help`.
 
@@ -110,10 +122,13 @@ to remember; imported documents and email do not automatically become obligation
 Semantic memory search depends on the OpenClaw memory provider configuration; plain files
 and session continuity work without a new embedding service.
 
-The container sees only this installation's state and Google directory. It has no host
+By default the container sees only this installation's state and Google directory. It has no host
 home mount or Docker socket. The Gateway binds inside its container for Docker forwarding;
 the host publishes **only loopback**, on a separate default port. Pick another free port
 with `./tari init --port 18999` on first use.
+
+Optional DailyGrad setup adds reviewed plugin code, read-only selected digest data,
+and a read-only socket volume; the standalone package stays in the separate runner.
 
 ## Google setup
 
@@ -200,34 +215,70 @@ See [API contract and Python example](docs/api.md). No custom bridge service is 
 Future voice applications should keep the Gateway token in their backend; browsers should
 never receive it or mount assistant state. Boson/Higgs is not integrated in v0.
 
-Add focused workflows as workspace skills. DailyGrad is optional: its scheduling/plugin
-infrastructure is omitted. For now export a digest from your independently installed
-DailyGrad into a selected text/Markdown document and import it with provenance. No local
-DailyGrad checkout, scheduler, or remote runner is required or accessed. A small authenticated
-read-only digest adapter is a future extension.
+Add focused workflows as workspace skills. DailyGrad is an optional separate dependency;
+the six-tool plugin reads its selected output directory through a read-only mount.
+The optional constrained runner is a separate container, with no published port or Tari
+credentials. See [DailyGrad setup](docs/dailygrad.md) for generation/repair opt-ins, news
+source changes, exercise preferences, troubleshooting, and disabling the integration.
+No automatic DailyGrad runs or posting are installed.
+
+## Daily briefs and timezone
+
+Ask “Give me my morning brief,” “What are my priorities today?”, “Help me plan my day,”
+or “What's coming up tomorrow?” Tari combines available domain notes, preferences,
+planner/checklist state, Calendar, and bounded Gmail retrieval. A quiet day gets a short
+brief. Unavailable Google sources are disclosed; they are never treated as empty.
+DailyGrad appears only when relevant and configured. A brief never writes a plan,
+creates Calendar events, or starts a DailyGrad run.
+
+```sh
+./tari timezone
+./tari timezone Europe/Berlin
+./tari exec ./bin/tari-brief-context tomorrow
+```
+
+The helper collects source context; Tari's model writes the adaptive natural-language
+brief. It can collect local context without Google or DailyGrad. Mail is the first 20
+messages from the recent 48 hours, including read and unread, rather than a complete
+inbox recap. Calendar windows use local midnight and DST-aware offsets. UTC is the
+default; invalid IANA timezones produce a clear error.
+
+For an existing v0 installation, update the distributed helpers/skills and deliberately
+replace startup instructions after reviewing your customizations:
+
+```sh
+./tari workspace-update --instructions
+./tari start
+```
+
+This preserves USER, IDENTITY, MEMORY, domains, planner data, documents, credentials,
+and user-added files. Distributed helpers/skills are refreshed; `--instructions` also
+replaces AGENTS, SOUL, TOOLS, and HEARTBEAT. Omit that flag to preserve customized startup
+instructions and merge their relevant changes yourself.
 
 ## Validation and limitations
 
 ```sh
 python3 -B -m unittest discover -s tests -v
+node --test tests/dailygrad-plugin/*.test.mjs
 python3 scripts/scan_public.py
 ```
 
-Tests use fictional fixtures and mocked Google subprocesses. See [implementation and
-verification notes](docs/implementation.md) for the actual checks performed and live checks
+Tests use fictional fixtures and mocked Google subprocesses. See [v0.1 readiness and
+owner acceptance](docs/readiness.md) for the actual checks performed and live checks
 still needed. No real model or Google credential is included. A successful health probe
 does not prove a model reply or OAuth access works.
 
 This is a trusted, single-owner local assistant. Full OpenClaw tools execute inside its
 container. Wrapper confirmations and Markdown instructions are not a separate malicious-agent
 sandbox. Calendar writes can affect owned events; enable them only when needed. There are
-no scheduled briefs, proactive notifications, or reminder delivery configured in v0; briefs
+no scheduled briefs, proactive notifications, or reminder delivery configured; briefs
 are on demand. Portability to Linux/WSL is designed but should be verified on those hosts.
 Dependencies are compatibility pins, not a promise of indefinite security support; review
 upstream advisories before deployment beyond a local development environment.
 
-Next: a secure voice backend, optional read-only DailyGrad adapter, and carefully scoped
-reminders. Useful changes from private Tari are transferred through deliberate source review,
+Next: a secure voice backend and carefully scoped reminders. Useful changes from private
+Tari are transferred through deliberate source review,
 sanitization, focused tests, and public diff review. The repositories do not mirror each
 other and share no Git history or runtime state. See [curation notes](docs/implementation.md).
 

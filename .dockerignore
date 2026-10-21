@@ -1,3 +1,6 @@
 **
 !docker/
 !docker/Dockerfile
+!docker/Dockerfile.dailygrad
+!scripts/
+!scripts/dailygrad_runner.py
