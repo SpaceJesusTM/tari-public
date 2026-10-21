@@ -81,7 +81,8 @@ This adapter owns `.local/dailygrad/dailygrad.toml`; it never edits a standalone
 checkout's configuration. To match custom feeds or other standalone settings,
 edit that managed file on the host using the upstream schema, keeping its
 top-level `data_dir = "/data"`. Stop/start the optional runner to apply edits.
-Re-running `configure` rewrites this managed file with the selected URL/model,
+Re-running `configure` first confirms any existing runner is stopped, then
+rewrites this managed file with the selected URL/model,
 so retain a private copy of custom settings first. Model text cannot choose or
 edit the runner's configuration path.
 

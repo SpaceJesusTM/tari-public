@@ -11,6 +11,17 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 MAX_OUTPUT = 256 * 1024
 MAX_NOTES = 12
+WARNING_MESSAGES = {
+    "PLANNER_SCHEDULE_MALFORMED": "Some local planner schedule entries could not be parsed.",
+    "PLANNER_CHECKLIST_MALFORMED": "Some local planner checklist entries could not be parsed.",
+    "CALENDAR_NOT_CHECKED": "Calendar is outside this local planner source's scope.",
+    "CALENDAR_UNAVAILABLE": "Calendar could not be read; schedule coverage is incomplete.",
+    "SOURCE_WARNING": "The source reported a warning; its coverage may be incomplete.",
+    "SOURCE_DIAGNOSTIC_PRESENT": "The source reported a diagnostic; its coverage may be incomplete.",
+    "SOURCE_MALFORMED": "The source returned malformed or unexpected data.",
+    "SOURCE_UNAVAILABLE": "Source retrieval failed; do not infer it is empty.",
+    "SOURCE_OUTPUT_LIMIT": "Source output exceeded the collection limit.",
+}
 
 
 def window(day, zone, now):
@@ -44,21 +55,69 @@ def note(path, root, limit):
 
 
 def helper(root, name, args):
+    def unavailable(code, quality="unavailable"):
+        return {"status": "unavailable", "quality": quality, "reason": WARNING_MESSAGES[code],
+                "warnings": [{"code": code, "message": WARNING_MESSAGES[code]}]}
     try:
         tool = safe(root / "bin" / name, root)
         result = subprocess.run([sys.executable, str(tool), *args], cwd=root, capture_output=True,
                                 text=True, timeout=65, check=False)
-        if result.returncode or len(result.stdout.encode()) > MAX_OUTPUT:
-            raise ValueError()
-        data = json.loads(result.stdout)
-        if not isinstance(data, dict):
-            raise ValueError()
-        return {"status": "available", "data": data, "untrusted_content": True}
     except (OSError, ValueError, subprocess.TimeoutExpired):
-        return {"status": "unavailable", "reason": "Source retrieval failed; do not infer it is empty"}
+        return unavailable("SOURCE_UNAVAILABLE")
+    if result.returncode:
+        return unavailable("SOURCE_UNAVAILABLE")
+    if len(result.stdout.encode()) > MAX_OUTPUT:
+        return unavailable("SOURCE_OUTPUT_LIMIT", "incomplete")
+    try:
+        data = json.loads(result.stdout)
+    except (ValueError, TypeError):
+        return unavailable("SOURCE_MALFORMED", "malformed")
+    if not isinstance(data, dict):
+        return unavailable("SOURCE_MALFORMED", "malformed")
+    if name == "day-planner" and (not isinstance(data.get("schedule"), list)
+                                  or not isinstance(data.get("checklist"), list)):
+        return unavailable("SOURCE_MALFORMED", "malformed")
+    if name == "day-planner" and any(not isinstance(row, dict) for key in ("schedule", "checklist") for row in data[key]):
+        return unavailable("SOURCE_MALFORMED", "malformed")
+    declared = data.get("data_status")
+    if ("data_status" in data and (not isinstance(declared, str) or declared not in {"complete", "incomplete", "malformed"})) \
+            or ("complete" in data and type(data["complete"]) is not bool):
+        return unavailable("SOURCE_MALFORMED", "malformed")
+    details = []
+    raw_details = data.get("warning_details", [])
+    if not isinstance(raw_details, list):
+        return unavailable("SOURCE_MALFORMED", "malformed")
+    for entry in raw_details[:32]:
+        code = entry.get("code") if isinstance(entry, dict) else None
+        code = code if isinstance(code, str) and code in WARNING_MESSAGES else "SOURCE_WARNING"
+        detail = {"code": code, "message": WARNING_MESSAGES[code]}
+        if isinstance(entry, dict) and type(entry.get("count")) is int and 0 <= entry["count"] <= 100000:
+            detail["count"] = entry["count"]
+        details.append(detail)
+    if data.get("warnings") and not details:
+        details.append({"code": "SOURCE_WARNING", "message": WARNING_MESSAGES["SOURCE_WARNING"]})
+    if result.stderr.strip():
+        details.append({"code": "SOURCE_DIAGNOSTIC_PRESENT", "message": WARNING_MESSAGES["SOURCE_DIAGNOSTIC_PRESENT"]})
+    quality = declared if isinstance(declared, str) and declared in {"complete", "incomplete", "malformed"} else "complete"
+    meaningful = [entry for entry in details if entry["code"] != "CALENDAR_NOT_CHECKED"]
+    if any(entry["code"] in {"PLANNER_SCHEDULE_MALFORMED", "PLANNER_CHECKLIST_MALFORMED"} for entry in details):
+        quality = "malformed"
+    elif meaningful or data.get("complete") is False:
+        quality = "incomplete" if quality == "complete" else quality
+    if quality != "complete" and not meaningful:
+        details.append({"code": "SOURCE_WARNING", "message": WARNING_MESSAGES["SOURCE_WARNING"]})
+    if name == "day-planner":
+        data = {key: data[key] for key in ("date", "schedule", "checklist") if key in data}
+    else:
+        data = dict(data)
+        data.pop("warning_details", None)
+    if details:
+        data["warnings"] = [entry["message"] for entry in details]
+    return {"status": "available" if quality == "complete" else "partial", "quality": quality,
+            "warnings": details, "data": data, "untrusted_content": True}
 
 
-def collect(day="today", local_only=False, now=None):
+def collect(day="today", local_only=False, now=None, private_memory=False):
     root = Path(os.environ.get("TARI_WORKSPACE", Path(__file__).absolute().parent.parent)).absolute()
     zone_name = os.environ.get("TARI_TIMEZONE") or "UTC"
     try:
@@ -79,7 +138,7 @@ def collect(day="today", local_only=False, now=None):
               "calendar_window": {"start": start.isoformat(), "end": end.isoformat()},
               "sources": {"domains": domains,
                   "preferences": note(root / "USER.md", root, 3000),
-                  "memory": note(root / "MEMORY.md", root, 4000),
+                   "memory": note(root / "MEMORY.md", root, 4000) if private_memory else {"status": "not_requested"},
                   "planner": helper(root, "day-planner", ["show", chosen.isoformat(), "--json", "--no-calendar"])},
               "read_only": True, "untrusted_content": True,
               "instruction": "Synthesize an adaptive brief using available sources and source precedence. No writes or inferred commitments. Disclose unavailable and bounded sources."}
@@ -110,9 +169,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("day", nargs="?", default="today")
     parser.add_argument("--local-only", action="store_true")
+    parser.add_argument("--private-memory", action="store_true",
+                        help="Include curated memory only for an authorized private owner conversation")
     args = parser.parse_args()
     try:
-        print(json.dumps(collect(args.day, args.local_only), ensure_ascii=False))
+        print(json.dumps(collect(args.day, args.local_only, private_memory=args.private_memory), ensure_ascii=False))
         return 0
     except (OSError, ValueError) as error:
         print(json.dumps({"error": str(error), "read_only": True}), file=sys.stderr)

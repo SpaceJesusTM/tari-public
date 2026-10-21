@@ -73,7 +73,8 @@ was consulted. This separates a source claim, a suggestion, and an actual change
 Try “Give me my morning brief,” “What should I know about today?”, “What are my
 priorities today?”, or “What's coming up tomorrow?” Tari prioritizes material
 deadlines, decisions, conflicts, and next steps. Quiet days can have short briefs;
-there is no fixed output template or automatic delivery.
+there is no fixed output template. Automatic delivery requires a separate explicit
+[morning-brief setup](automation.md); requesting a brief once never enables it.
 
 The read-only source collector is available directly:
 
@@ -81,8 +82,10 @@ The read-only source collector is available directly:
 ./tari exec ./bin/tari-brief-context tomorrow
 ```
 
-It collects relevant domain notes, preferences, memory, local planner/checklist
+It collects relevant domain notes, preferences, local planner/checklist
 state, and configured Google context. Tari's model then synthesizes the brief.
+Curated memory is omitted by default; `--private-memory` is an explicit option for
+a trusted private owner conversation, never a scheduled or shared-channel brief.
 Without Google, local context still works; failed retrieval is reported as unknown,
 not an empty inbox or free schedule.
 
@@ -95,6 +98,17 @@ unless accepted or explicitly confirmed; planner suggestions are not commitments
 DailyGrad is included selectively when configured and relevant. A brief never
 starts a DailyGrad run, repair, source update, or exercise change. It also does not
 create Calendar events or save a planner arrangement.
+
+## Reminders and Discord
+
+After the owner explicitly [configures reminders](automation.md), ask “Remind me
+in 20 minutes to check the build.” Tari resolves the time and registers a native
+one-shot command job; delivery uses no model. Listing and cancellation use actual
+scheduler IDs. Registration confirms a pending job, not successful delivery.
+
+[Native Discord](discord.md) supports paired DMs and explicitly configured guild
+channels with its normal permissions. Reading a saved planner or DailyGrad digest
+in Discord does not regenerate or edit it.
 
 ## Connected sources
 

@@ -1,0 +1,17 @@
+{
+  "name": "tari-public-workflows",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Constrained native brief context and deterministic reminder tools for Tari Public.",
+  "peerDependencies": {
+    "openclaw": ">=2026.9.9"
+  },
+  "openclaw": {
+    "extensions": ["./index.js"],
+    "compat": {
+      "pluginApi": ">=2026.9.9",
+      "minGatewayVersion": "2026.9.9"
+    }
+  }
+}

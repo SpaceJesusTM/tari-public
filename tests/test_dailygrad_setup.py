@@ -56,6 +56,9 @@ class DailyGradSetupTests(unittest.TestCase):
         self.recreate = patch.object(cli, "recreate_running", return_value=None)
         self.recreate_mock = self.recreate.start()
         self.addCleanup(self.recreate.stop)
+        self.running = patch.object(cli, "running_service", return_value=False)
+        self.running_mock = self.running.start()
+        self.addCleanup(self.running.stop)
 
     def configure(self):
         output = io.StringIO()
@@ -294,7 +297,8 @@ class DailyGradSetupTests(unittest.TestCase):
         updated = self.runtime()
         self.assertNotIn(setup.PLUGIN_ID, updated["plugins"]["entries"])
         self.assertEqual(updated["plugins"]["entries"]["fixture-other"], {"enabled": True})
-        self.assertEqual(updated["plugins"]["load"]["paths"], ["/opt/fixture-other"])
+        self.assertEqual(updated["plugins"]["load"]["paths"],
+                         ["/opt/tari/plugins/tari-workflows", "/opt/fixture-other"])
         self.assertEqual(updated["plugins"]["allow"], ["fixture-other"])
         self.assertEqual(updated["agents"], runtime["agents"])
         self.assertEqual(data_file.read_text(), '{"fixture": true}')
@@ -362,6 +366,230 @@ class DailyGradSetupTests(unittest.TestCase):
                     self.configure()
                 self.assertEqual(self.snapshot(), before)
                 setattr(self.args, field, original)
+
+    def simulate_running_runner(self):
+        """Track effective process policy separately from files, as a real runner does."""
+        saved = setup.settings(cli)
+        state = {"running": True, "capabilities": dict(saved["capabilities"]), "events": []}
+        self.running_mock.side_effect = lambda service: state["running"] if service == "dailygrad-runner" else False
+
+        def lifecycle(*args):
+            overlay = json.loads((self.local / "dailygrad/compose.json").read_text())
+            saved = setup.settings(cli)
+            event = {"args": args, "capabilities": dict(saved["capabilities"]),
+                     "overlay": overlay, "model_config": (self.local / "dailygrad/dailygrad.toml").read_text()}
+            state["events"].append(event)
+            if "stop" in args:
+                state["running"] = False
+            elif "up" in args:
+                state.update(running=True, capabilities=dict(saved["capabilities"]),
+                             overlay=overlay, model_config=event["model_config"])
+            else:
+                self.fail("Unexpected service operation during configure")
+            return 0
+
+        self.compose_mock.side_effect = lifecycle
+        return state
+
+    def test_running_runner_permission_expansion_recreates_only_that_service(self):
+        self.configure()
+        state = self.simulate_running_runner()
+        self.args.allow_run = True
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(setup.configure(self.args, cli), 0)
+        self.assertTrue(state["running"])
+        self.assertTrue(state["capabilities"]["allowRun"])
+        self.assertFalse(state["events"][0]["capabilities"]["allowRun"])
+        self.assertIn("stop", state["events"][0]["args"])
+        self.assertTrue(state["events"][1]["capabilities"]["allowRun"])
+        self.assertIn("--force-recreate", state["events"][1]["args"])
+        self.assertIn("--no-build", state["events"][1]["args"])
+        self.assertTrue(all(event["args"][-1] == "dailygrad-runner" for event in state["events"]))
+        self.assertFalse(any("run" in event["args"] for event in state["events"]))
+
+    def test_running_runner_revocation_quiesces_old_policy_before_replacing_files(self):
+        for option in setup.CAPABILITIES:
+            setattr(self.args, option, True)
+        self.configure()
+        state = self.simulate_running_runner()
+        for option in setup.CAPABILITIES:
+            setattr(self.args, option, False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(setup.configure(self.args, cli), 0)
+        self.assertTrue(all(state["events"][0]["capabilities"].values()))
+        self.assertFalse(any(state["events"][1]["capabilities"].values()))
+        self.assertFalse(any(state["capabilities"].values()))
+        self.assertTrue(state["running"])
+
+    def test_settings_data_model_and_timezone_use_new_mounts_after_quiescence(self):
+        self.configure()
+        state = self.simulate_running_runner()
+        replacement = self.base / "replacement-output"
+        replacement.mkdir()
+        self.args.data_dir = str(replacement)
+        self.args.ollama_url = "http://fixture-model-server:11434"
+        self.args.ollama_model = "replacement-model"
+        env = self.local / "runtime.env"
+        env.write_text(env.read_text().replace("Europe/Paris", "Asia/Tokyo"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(setup.configure(self.args, cli), 0)
+        old_runner = state["events"][0]["overlay"]["services"]["dailygrad-runner"]
+        new_runner = state["overlay"]["services"]["dailygrad-runner"]
+        self.assertEqual(next(m["source"] for m in old_runner["volumes"] if m["target"] == "/data"), str(self.external_data))
+        self.assertEqual(next(m["source"] for m in new_runner["volumes"] if m["target"] == "/data"), str(replacement))
+        self.assertEqual(new_runner["command"][new_runner["command"].index("--timezone") + 1], "Asia/Tokyo")
+        self.assertIn('model = "replacement-model"', state["model_config"])
+        self.assertIn('url = "http://fixture-model-server:11434"', state["model_config"])
+        self.assertIn("--force-recreate", state["events"][1]["args"])
+        self.assertEqual(self.runtime()["plugins"]["entries"][setup.PLUGIN_ID]["config"]["timeZone"], "Asia/Tokyo")
+
+    def test_stopped_runner_stays_stopped_during_reconfiguration(self):
+        self.configure()
+        self.args.allow_run = True
+        self.args.ollama_model = "changed-while-stopped"
+        output = self.configure()
+        self.compose_mock.assert_not_called()
+        self.assertIn("No optional runner was started", output)
+        self.assertTrue(setup.settings(cli)["capabilities"]["allowRun"])
+
+    def test_first_time_offline_configuration_saves_without_starting_any_runner(self):
+        self.running_mock.return_value = None
+        output = self.configure()
+        self.assertTrue(setup.settings(cli)["enabled"])
+        self.compose_mock.assert_not_called()
+        self.assertIn("No optional runner was started", output)
+
+    def test_unknown_previous_runner_state_requires_confirmed_stop_before_applying(self):
+        self.args.allow_run = True
+        self.configure()
+        before = self.snapshot()
+        self.args.allow_run = False
+        self.running_mock.return_value = None
+        self.recreate_mock.reset_mock()
+        with contextlib.redirect_stderr(io.StringIO()) as error:
+            self.assertEqual(setup.configure(self.args, cli), 1)
+        self.assertEqual(self.snapshot(), before)
+        self.assertIn("could not be confirmed stopped", error.getvalue())
+        self.assertIn("permissions may still be active", error.getvalue())
+        self.recreate_mock.assert_not_called()
+        self.assertNotIn("up", self.compose_mock.call_args.args)
+
+    def test_unknown_runner_that_can_be_stopped_is_not_restarted_automatically(self):
+        self.configure()
+        self.running_mock.side_effect = [None, False]
+        self.args.allow_run = True
+        output = self.configure()
+        self.assertEqual(self.compose_mock.call_count, 1)
+        self.assertIn("stop", self.compose_mock.call_args.args)
+        self.assertIn("No optional runner was started", output)
+
+    def test_successful_stop_command_without_stopped_state_cannot_revoke_permissions(self):
+        self.args.allow_run = True
+        self.configure()
+        before = self.snapshot()
+        self.args.allow_run = False
+        self.running_mock.return_value = True
+        self.recreate_mock.reset_mock()
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(setup.configure(self.args, cli), 1)
+        self.assertEqual(self.snapshot(), before)
+        self.recreate_mock.assert_not_called()
+
+    def test_failed_recreation_stops_partially_started_runner_and_reports_failure(self):
+        self.args.allow_run = True
+        self.configure()
+        state = self.simulate_running_runner()
+        successful = self.compose_mock.side_effect
+        self.args.allow_run = False
+
+        def fail_recreation(*args):
+            result = successful(*args)
+            return 8 if "up" in args else result
+
+        self.compose_mock.side_effect = fail_recreation
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as error:
+            self.assertEqual(setup.configure(self.args, cli), 8)
+        self.assertEqual(["up" if "up" in e["args"] else "stop" for e in state["events"]], ["stop", "up", "stop"])
+        self.assertFalse(state["running"])
+        self.assertFalse(setup.settings(cli)["capabilities"]["allowRun"])
+        self.assertIn("confirmed stopped", error.getvalue())
+
+    def test_unverifiable_recreated_runner_is_stopped_instead_of_claiming_success(self):
+        self.configure()
+        state = self.simulate_running_runner()
+        successful = self.compose_mock.side_effect
+
+        def unknown_after_start(*args):
+            result = successful(*args)
+            if "up" in args:
+                state["running"] = None
+            return result
+
+        self.compose_mock.side_effect = unknown_after_start
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as error:
+            self.assertEqual(setup.configure(self.args, cli), 1)
+        self.assertFalse(state["running"])
+        self.assertIn("confirmed stopped", error.getvalue())
+
+    def test_failed_recreation_with_unverifiable_shutdown_never_claims_revocation(self):
+        self.args.allow_run = True
+        self.configure()
+        state = self.simulate_running_runner()
+        successful = self.compose_mock.side_effect
+        self.args.allow_run = False
+
+        def unavailable_during_recreation(*args):
+            result = successful(*args)
+            if "up" in args or len(state["events"]) > 2:
+                state["running"] = None
+                return 8
+            return result
+
+        self.compose_mock.side_effect = unavailable_during_recreation
+        with contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as error:
+            self.assertEqual(setup.configure(self.args, cli), 8)
+        self.assertIsNone(state["running"])
+        self.assertIn("shutdown could not be verified", error.getvalue())
+        self.assertNotIn("The optional runner is confirmed stopped", error.getvalue())
+        self.assertIn("do not rely on permission revocation", error.getvalue())
+        self.assertNotIn("DailyGrad configured", output.getvalue())
+        self.assertFalse(setup.settings(cli)["capabilities"]["allowRun"])
+
+    def test_failed_core_apply_leaves_previous_runner_stopped(self):
+        self.configure()
+        state = self.simulate_running_runner()
+        self.recreate_mock.return_value = 7
+        with contextlib.redirect_stderr(io.StringIO()) as error:
+            self.assertEqual(setup.configure(self.args, cli), 7)
+        self.assertFalse(state["running"])
+        self.assertEqual(len(state["events"]), 1)
+        self.assertIn("not restarted", error.getvalue())
+
+    def test_failed_save_leaves_previous_runner_stopped_and_does_not_recreate_core(self):
+        self.configure()
+        state = self.simulate_running_runner()
+        self.recreate_mock.reset_mock()
+        with patch.object(setup, "write_json", side_effect=OSError("fixture disk failure")), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(setup.configure(self.args, cli), 1)
+        self.assertFalse(state["running"])
+        self.assertEqual(len(state["events"]), 1)
+        self.recreate_mock.assert_not_called()
+
+    def test_concurrent_configuration_is_rejected_before_service_changes(self):
+        with setup.configuration_lock(cli):
+            with self.assertRaisesRegex(ValueError, "already being changed"):
+                self.configure()
+        self.compose_mock.assert_not_called()
+        self.recreate_mock.assert_not_called()
+
+    def test_optional_lock_unavailable_refuses_configure_without_changing_core(self):
+        before = self.snapshot()
+        with patch.object(setup, "fcntl", None):
+            with self.assertRaisesRegex(ValueError, "Unix file locking"):
+                self.configure()
+        self.assertEqual(self.snapshot(), before)
+        self.compose_mock.assert_not_called()
+        self.recreate_mock.assert_not_called()
 
 
 if __name__ == "__main__":

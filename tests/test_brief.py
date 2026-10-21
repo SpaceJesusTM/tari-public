@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -39,12 +41,97 @@ class BriefTests(unittest.TestCase):
         result = brief.collect(now=self.now)
         self.assertEqual(result["date"], "2026-10-21")
         self.assertEqual(result["sources"]["planner"]["status"], "available")
+        self.assertEqual(result["sources"]["planner"]["quality"], "complete")
         self.assertEqual(result["sources"]["planner"]["data"]["schedule"], [])
         self.assertEqual(result["sources"]["gmail"]["status"], "not_configured")
         self.assertEqual(result["sources"]["calendar"]["status"], "not_configured")
         self.assertIn("report", result["sources"]["domains"]["files"][0]["text"])
         self.assertFalse((self.root / "planner").exists())
         self.assertTrue(result["read_only"])
+
+    def test_memory_is_omitted_by_default_and_requires_explicit_private_opt_in(self):
+        (self.root / "MEMORY.md").write_text("Fixture private memory; never a scheduled briefing source.")
+        with patch.object(brief, "note", wraps=brief.note) as note:
+            result = brief.collect(now=self.now)
+        self.assertEqual(result["sources"]["memory"]["status"], "not_requested")
+        self.assertFalse(any(call.args[0].name == "MEMORY.md" for call in note.call_args_list))
+        self.assertNotIn("Fixture private memory", json.dumps(result))
+        result = brief.collect(now=self.now, private_memory=True)
+        self.assertEqual(result["sources"]["memory"]["status"], "available")
+        self.assertIn("Fixture private memory", result["sources"]["memory"]["text"])
+
+    def test_private_memory_cli_flag_is_explicit(self):
+        with patch("sys.argv", ["tari-brief-context", "tomorrow", "--private-memory"]), \
+                patch.object(brief, "collect", return_value={"read_only": True}) as collect, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(brief.main(), 0)
+        collect.assert_called_once_with("tomorrow", False, private_memory=True)
+
+    def test_actual_partially_parsed_planner_preserves_sanitized_warnings(self):
+        day = self.root / "planner/days/2026-10-21.md"
+        day.parent.mkdir(parents=True)
+        day.write_text("# Day Plan — 2026-10-21\n## Schedule\n"
+                       "- 13:00-14:00 | planner | Fictional draft <!-- b1 -->\n"
+                       "PRIVATE UNPARSEABLE SCHEDULE NOTE\n")
+        checklist = self.root / "planner/checklist.md"
+        checklist.write_text("# Planner Checklist\n## Work\n"
+                             "- [ ] Fictional report <!-- t1 -->\nPRIVATE UNPARSEABLE CHECKLIST NOTE\n")
+        before = (day.read_bytes(), checklist.read_bytes())
+        result = brief.collect(now=self.now)
+        planner = result["sources"]["planner"]
+        self.assertEqual(planner["status"], "partial")
+        self.assertEqual(planner["quality"], "malformed")
+        codes = {warning["code"] for warning in planner["warnings"]}
+        self.assertIn("PLANNER_SCHEDULE_MALFORMED", codes)
+        self.assertIn("PLANNER_CHECKLIST_MALFORMED", codes)
+        self.assertEqual(len(planner["data"]["schedule"]), 1)
+        self.assertEqual(len(planner["data"]["checklist"][0]["tasks"]), 1)
+        self.assertNotIn("PRIVATE UNPARSEABLE", json.dumps(result))
+        self.assertNotIn(str(self.root), json.dumps(result))
+        self.assertEqual((day.read_bytes(), checklist.read_bytes()), before)
+
+    def test_missing_planner_helper_is_unavailable_rather_than_empty(self):
+        (self.root / "bin/day-planner").unlink()
+        source = brief.collect(now=self.now)["sources"]["planner"]
+        self.assertEqual(source["status"], "unavailable")
+        self.assertEqual(source["quality"], "unavailable")
+        self.assertNotIn("data", source)
+
+    def test_malformed_helper_json_and_shape_are_distinguished_from_unavailability(self):
+        for payload in ["{invalid", "[]", '{"schedule": {}, "checklist": []}',
+                        '{"schedule": ["invalid"], "checklist": []}',
+                        '{"schedule": [], "checklist": [], "data_status": []}',
+                        '{"schedule": [], "checklist": [], "complete": "false"}']:
+            with self.subTest(payload=payload), patch.object(brief.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, payload, "PRIVATE DIAGNOSTIC")):
+                source = brief.helper(self.root, "day-planner", [])
+                self.assertEqual(source["status"], "unavailable")
+                self.assertEqual(source["quality"], "malformed")
+                self.assertEqual(source["warnings"][0]["code"], "SOURCE_MALFORMED")
+                self.assertNotIn("PRIVATE", json.dumps(source))
+
+    def test_successful_legacy_helper_stderr_becomes_generic_partial_warning(self):
+        result = subprocess.CompletedProcess([], 0, '{"schedule": [], "checklist": []}', "PRIVATE RAW PATH OR NOTE")
+        with patch.object(brief.subprocess, "run", return_value=result):
+            source = brief.helper(self.root, "day-planner", [])
+        self.assertEqual(source["status"], "partial")
+        self.assertEqual(source["quality"], "incomplete")
+        self.assertEqual(source["warnings"][0]["code"], "SOURCE_DIAGNOSTIC_PRESENT")
+        self.assertNotIn("PRIVATE", json.dumps(source))
+
+    def test_structured_warning_messages_are_sanitized_and_bounded(self):
+        payload = {"schedule": [], "checklist": [], "complete": False, "data_status": "incomplete",
+                   "warnings": ["PRIVATE RAW WARNING"],
+                   "warning_details": [{"code": "CALENDAR_UNAVAILABLE", "message": "PRIVATE RAW DIAGNOSTIC"}] * 100,
+                   "private_diagnostic": "PRIVATE RAW EXTRA FIELD"}
+        with patch.object(brief.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps(payload), "")):
+            source = brief.helper(self.root, "day-planner", [])
+        self.assertEqual(source["status"], "partial")
+        self.assertEqual(source["quality"], "incomplete")
+        self.assertEqual(len(source["warnings"]), 32)
+        self.assertNotIn("PRIVATE", json.dumps(source))
+        with patch.object(brief.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "x" * (brief.MAX_OUTPUT + 1), "")):
+            source = brief.helper(self.root, "day-planner", [])
+        self.assertEqual(source["warnings"][0]["code"], "SOURCE_OUTPUT_LIMIT")
 
     def test_available_google_uses_offset_window_and_bounded_read_only_mail(self):
         def fake(command, **kwargs):

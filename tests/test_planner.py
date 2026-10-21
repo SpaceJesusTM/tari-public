@@ -277,6 +277,33 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(self.run_cli("add", "tomorrow", "13:00-14:00", "Draft")[0], 5)
         self.assertEqual(self.day_path().read_text(), bad)
 
+    def test_json_view_exposes_generic_parse_quality_without_raw_notes_or_paths(self):
+        self.day_path().parent.mkdir(parents=True)
+        self.day_path().write_text("# Day Plan — 2026-10-21\n## Schedule\n"
+                                   "- 13:00-14:00 | planner | Fictional draft <!-- b1 -->\n"
+                                   "PRIVATE MALFORMED NOTE\n")
+        code, out, error = self.run_cli("show", "tomorrow", "--json", "--no-calendar")
+        self.assertEqual(code, 0)
+        result = json.loads(out)
+        self.assertEqual(result["data_status"], "malformed")
+        self.assertFalse(result["complete"])
+        self.assertEqual(len(result["schedule"]), 1)
+        self.assertIn("PLANNER_SCHEDULE_MALFORMED", [item["code"] for item in result["warning_details"]])
+        self.assertNotIn("PRIVATE MALFORMED", out + error)
+        self.assertNotIn(self.temp.name, out + error)
+
+    def test_json_local_scope_is_complete_but_failed_calendar_is_incomplete(self):
+        _, out, _ = self.run_cli("show", "tomorrow", "--json", "--no-calendar")
+        result = json.loads(out)
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["data_status"], "complete")
+        self.mock_run.side_effect = OSError("fixture unavailable")
+        _, out, _ = self.run_cli("show", "tomorrow", "--json")
+        result = json.loads(out)
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["data_status"], "incomplete")
+        self.assertEqual(result["warning_details"][0]["code"], "CALENDAR_UNAVAILABLE")
+
     def test_malformed_source_day_cannot_partially_move(self):
         self.run_cli("add", "today", "13:00-14:00", "Draft")
         with self.day_path("2026-10-20").open("a") as stream:

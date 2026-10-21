@@ -34,16 +34,19 @@ not overwrite an existing installation or rotate its secrets. The default model
 remains `openai/gpt-6.1-sol` unless you select another.
 
 OpenClaw-managed authentication profiles can also be used without those environment
-keys. Start the container, then use its supported provider login:
+keys. For the default OpenAI route, start the container and select the provider
+explicitly during login:
 
 ```sh
 ./tari start
-./tari openclaw models auth login --agent tari
+./tari openclaw models auth login --provider openai --agent tari
 ./tari openclaw models status --agent tari --json --check
 ```
 
-The login command offers methods supplied by installed provider plugins; availability
-depends on the provider. Use `./tari openclaw models auth login --help` for options.
+The login command runs methods supplied by the selected provider plugin; availability
+depends on the provider. The `models auth add` helper offers interactive provider
+setup. Use `./tari openclaw models auth --help` or
+`./tari openclaw models auth login --help` for options.
 Sign in within this installation. Do not copy another application's auth store or
 credential files. A successful login does not guarantee access to every model.
 
@@ -115,6 +118,7 @@ only a device you recognize. For a different host port, choose
 | `.local/runtime.env` | Provider settings, generated Gateway/keyring secrets, timezone, port, and installation identity |
 | `.local/state/openclaw.json` | Active OpenClaw configuration |
 | `.local/state/workspace/` | Active instructions, preferences, memory, planner, and documents |
+| `.local/state/tari-workflows/` | Explicit briefing/reminder settings and actual native scheduler job IDs |
 | `.local/google/` | This installation's OAuth client and encrypted file keyring |
 | `.local/dailygrad/` | Optional DailyGrad adapter settings and runner state |
 
@@ -174,6 +178,25 @@ documents, and credentials. Keep a private copy of custom instruction edits firs
 or merge the relevant instruction changes yourself.
 
 ## Optional integrations and development checks
+
+[Discord](discord.md) uses native OpenClaw setup, pairing, and guild/channel
+configuration; no custom Discord management layer is installed. Connectivity is
+optional and unconfigured by default. [Morning briefs and reminders](automation.md)
+are separate opt-ins with explicitly chosen destinations. Configuring Discord
+does not create any jobs or enable a heartbeat.
+
+Existing installations can load the new workflow tools after updating source:
+
+```sh
+./tari workspace-update --instructions
+./tari automation setup
+./tari start
+```
+
+Review custom startup instructions before replacing them. Setup enables the fixed
+tools and updates their image/configuration; it creates no schedules. The selected
+morning-brief timezone is stored in the native job. After changing installation
+timezone, repeat its enable command with the intended timezone to update that job.
 
 - [Google setup](google.md): separate read-only mail and optional Calendar writes.
 - [DailyGrad setup](dailygrad.md): digest-only access or separately enabled controls.

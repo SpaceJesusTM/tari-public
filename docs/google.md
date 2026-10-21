@@ -93,7 +93,8 @@ see the pinned [client reference](https://github.com/openclaw/gogcli/blob/v0.40.
 
 Only after you intend to enable writes, set `TARI_CALENDAR_WRITES=1` in
 `.local/runtime.env` and run `./tari start`. The assistant's policy restricts writes
-to `primary`; the wrapper additionally rejects calendars you do not own. It refuses
+to `primary`; the wrapper enforces the discovered primary calendar and rejects
+secondary calendars even when you own them. It refuses
 recurring-series changes. Every write needs a concrete proposal and its token:
 
 ```sh

@@ -1,0 +1,15 @@
+{
+  "id": "tari-workflows",
+  "name": "Tari Workflows",
+  "description": "Bounded read-only brief context and owner-authorized native reminder registration, listing and cancellation.",
+  "categories": ["other"],
+  "activation": {"onStartup": true},
+  "contracts": {"tools": ["tari_brief_context", "tari_reminder_create", "tari_reminder_list", "tari_reminder_cancel"]},
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {"type": "boolean", "default": true}
+    }
+  }
+}

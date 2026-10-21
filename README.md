@@ -10,16 +10,17 @@ through documents, or pick up where you left off—with your own model and local
 
 | | What you can do |
 | --- | --- |
-| **Conversation** | Chat locally and return to the same conversation later. |
+| **Conversation** | Chat locally or connect optional native OpenClaw Discord; return to your conversations later. |
 | **Gmail & Calendar** | Search and summarize mail, review schedules, and authorize specific event changes. Optional Google setup. |
 | **Day Planner** | Manage time blocks, tasks, checklists, and commute time separately from Calendar. |
 | **Documents & memory** | Import text, Markdown, PDF, or DOCX with provenance; ask Tari to remember selected information. |
-| **Daily briefs** | Get an on-demand overview of priorities and available context, with missing sources clearly identified. |
+| **Daily briefs** | Request an overview now, or explicitly enable a daily brief with your chosen model, time, and destination. |
+| **Reminders** | Opt into exact one-shot reminders; delivery needs no additional model call. |
 | **Timezone** | Use your IANA timezone consistently for local dates, planning, and briefings. |
 | **DailyGrad** | Optionally add AI news digests, micro-lessons, and LeetCode exercises, with controls for generation and progress. |
 
-Google and DailyGrad are optional. Start with chat, local planning, and documents,
-then connect the services you want.
+Google, DailyGrad, Discord, and scheduled delivery are optional. Start with chat,
+local planning, and documents, then connect the services you want.
 
 ## Quick Start
 
@@ -72,6 +73,11 @@ historical digests without a runner; optionally enable generation, repair, sourc
 preferences, and exercise controls through the constrained runner. Nothing runs on
 a schedule. [DailyGrad setup →](docs/dailygrad.md)
 
+**Discord & scheduled delivery.** Use OpenClaw's native pairing, guild allowlists,
+and channel conversations. Separately opt into morning briefs or deterministic
+reminders with an explicit destination. [Discord →](docs/discord.md)
+· [Briefs & reminders →](docs/automation.md)
+
 ## How it works
 
 [OpenClaw](https://github.com/openclaw/openclaw) powers Tari's agent runtime, model
@@ -114,9 +120,10 @@ tokens are workflow checks, not independent proof of human approval. Imported ma
 documents, and digests remain untrusted content. See [SECURITY.md](SECURITY.md).
 
 PDF intake needs selectable text; OCR is not included. Semantic memory search needs
-an appropriate OpenClaw provider. Briefings are on demand: automatic reminders,
-scheduled briefs, Discord, and voice integration are not included. Linux/WSL and
-amd64 runtime checks remain part of release acceptance.
+an appropriate OpenClaw provider. All jobs and Discord connectivity start
+unconfigured. Scheduled delivery needs a running host/Gateway and separate live
+acceptance; voice integration is not included. Linux/WSL and amd64 runtime checks
+remain part of release acceptance.
 
 ## Documentation
 
@@ -124,8 +131,22 @@ amd64 runtime checks remain part of release acceptance.
 - [Everyday usage: chat, planning, documents, and briefs](docs/usage.md)
 - [Google authorization](docs/google.md)
 - [Optional DailyGrad integration](docs/dailygrad.md)
+- [Native Discord setup](docs/discord.md)
+- [Optional morning briefs and reminders](docs/automation.md)
 - [Local API](docs/api.md)
 - [Security](SECURITY.md)
+
+## Project Origins
+
+Tari began as a private personal AI assistant, developed and refined through ongoing
+use and experimentation. Its planning, memory, Google and DailyGrad integrations,
+and personalized workflows grew alongside that work.
+
+This repository is a curated, standalone open-source edition, independently
+maintained and adapted for portable, reproducible setup and use by other developers.
+Personal data, runtime state, private infrastructure, and deployment-specific
+configuration remain separate. Tari builds on OpenClaw's agent runtime, with
+additional assistant behavior, integrations, and workflows developed around it.
 
 ## License
 

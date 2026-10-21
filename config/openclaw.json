@@ -29,6 +29,12 @@
     "tailscale": {"mode": "off"}
   },
   "tools": {"profile": "full", "fs": {"workspaceOnly": true}},
-  "plugins": {"entries": {"memory-core": {"enabled": true, "config": {"dreaming": {"enabled": false}}}}},
+  "plugins": {
+    "load": {"paths": ["/opt/tari/plugins/tari-workflows"]},
+    "entries": {
+      "memory-core": {"enabled": true, "config": {"dreaming": {"enabled": false}}},
+      "tari-workflows": {"enabled": true, "config": {"enabled": true}}
+    }
+  },
   "telemetry": {"enabled": false}
 }

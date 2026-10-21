@@ -20,4 +20,6 @@ RUN set -eu; \
     install -m 0755 /tmp/gog-extract/gog /usr/local/bin/gog; \
     rm -rf /tmp/gog-extract /tmp/gog.tar.gz
 RUN install -d -m 1777 /run/tari-dailygrad
+COPY --chown=root:root plugins/tari-workflows /opt/tari/plugins/tari-workflows
+COPY --chown=root:root scripts/tari_automation.py /opt/tari/tari_automation.py
 USER node

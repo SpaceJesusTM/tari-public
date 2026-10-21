@@ -90,6 +90,36 @@ class GoogleTests(unittest.TestCase):
                 google.apply("a" * 32, "a" * 32)
         run.assert_not_called()
 
+    def test_secondary_calendar_proposals_are_rejected_before_event_or_write_access(self):
+        secondary = {"id": "secondary@example.test", "accessRole": "owner", "primary": False}
+        for operation in ["create", "update", "delete"]:
+            with self.subTest(operation=operation):
+                argv = ["calendar", "propose", operation, secondary["id"]]
+                if operation != "create":
+                    argv.append(EVENT["id"])
+                if operation != "delete":
+                    argv += ["--summary", "Reviewed meeting", "--start", "2026-10-20T11:00:00-04:00",
+                             "--end", "2026-10-20T12:00:00-04:00"]
+                with patch.object(google, "calendars", return_value=[OWN, secondary]), \
+                        patch.object(google, "event") as event_read, patch.object(google, "run_gog") as run:
+                    with self.assertRaisesRegex(google.GoogleError, "primary calendar"):
+                        google.propose(google.parser().parse_args(argv))
+                event_read.assert_not_called()
+                run.assert_not_called()
+        self.assertFalse((Path(self.temp.name) / "state/google-proposals").exists())
+
+    def test_primary_canonical_id_is_supported_and_ambiguous_primary_fails_closed(self):
+        args = google.parser().parse_args(["calendar", "propose", "create", OWN["id"], "--summary", "Canonical primary",
+                                          "--start", "2026-10-20T11:00:00-04:00", "--end", "2026-10-20T12:00:00-04:00"])
+        with patch.object(google, "calendars", return_value=[OWN]):
+            proposal = google.propose(args)
+        self.assertEqual(proposal["change"]["calendar_id"], OWN["id"])
+        ambiguous = {"id": "other@example.test", "accessRole": "owner", "primary": True}
+        for discovered in [[{**OWN, "primary": False}], [OWN, ambiguous], [{**OWN, "accessRole": "writer"}]]:
+            with self.subTest(calendars=discovered), patch.object(google, "calendars", return_value=discovered):
+                with self.assertRaisesRegex(google.GoogleError, "primary calendar"):
+                    google.owned_calendar("primary")
+
     def make_proposal(self, operation="create"):
         argv = ["calendar", "propose", operation, "primary"]
         if operation != "create":
@@ -106,6 +136,23 @@ class GoogleTests(unittest.TestCase):
             with self.assertRaises(google.GoogleError):
                 google.apply(proposal["proposal"], "wrong")
         run.assert_not_called()
+
+    def test_apply_rejects_preexisting_secondary_proposal_without_consuming_it(self):
+        proposal = self.make_proposal()
+        token = proposal["proposal"]
+        path = google.proposal_dir() / (token + ".json")
+        payload = json.loads(path.read_text())
+        secondary = {"id": "secondary@example.test", "accessRole": "owner", "primary": False}
+        payload["calendar_id"] = secondary["id"]
+        path.write_text(json.dumps(payload))
+        with patch.dict(os.environ, {"TARI_CALENDAR_WRITES": "1"}), \
+                patch.object(google, "calendars", return_value=[OWN, secondary]), \
+                patch.object(google, "event") as event_read, patch.object(google, "run_gog") as run:
+            with self.assertRaisesRegex(google.GoogleError, "primary calendar"):
+                google.apply(token, token)
+        event_read.assert_not_called()
+        run.assert_not_called()
+        self.assertEqual(json.loads(path.read_text())["status"], "pending")
 
     def test_concurrent_apply_lock_prevents_any_google_call(self):
         proposal = self.make_proposal()
@@ -133,6 +180,24 @@ class GoogleTests(unittest.TestCase):
             with self.assertRaises(google.GoogleError):
                 google.apply(proposal["proposal"], proposal["confirmation"])
         self.assertIn("--summary=Reviewed meeting", run.call_args.args[0])
+
+    def test_primary_update_and_delete_keep_reread_verification(self):
+        before = {**EVENT, "calendar_id": OWN["id"]}
+        for operation in ["update", "delete"]:
+            with self.subTest(operation=operation):
+                proposal = self.make_proposal(operation)
+                after = ({**EVENT, "summary": "Reviewed meeting", "start": {"dateTime": "2026-10-20T15:00:00Z"},
+                          "end": {"dateTime": "2026-10-20T16:00:00Z"}} if operation == "update"
+                         else {"id": EVENT["id"], "status": "cancelled"})
+                with patch.dict(os.environ, {"TARI_CALENDAR_WRITES": "1"}), \
+                        patch.object(google, "calendars", return_value=[OWN]), \
+                        patch.object(google, "event", side_effect=[before, after]) as read, \
+                        patch.object(google, "run_gog", return_value={}) as write:
+                    result = google.apply(proposal["proposal"], proposal["confirmation"])
+                self.assertTrue(result["verified"])
+                self.assertEqual(write.call_args.args[0][:3], ["calendar", operation, OWN["id"]])
+                self.assertEqual(read.call_count, 2)
+                self.assertEqual(read.call_args.kwargs, {"absent": operation == "delete", "write_profile": True})
 
     def test_stale_update_and_recurring_changes_rejected(self):
         proposal = self.make_proposal("update")

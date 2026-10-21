@@ -171,11 +171,11 @@ def proposal_dir():
 
 
 def owned_calendar(calendar_id):
-    match = next((row for row in calendars() if row["id"] == calendar_id or
-                  (calendar_id == "primary" and row.get("primary"))), None)
-    if match is None or match.get("accessRole") != "owner":
-        raise GoogleError("Calendar writes are limited to explicitly discovered owned calendars.")
-    return match["id"]
+    """Resolve only the discovered primary calendar, including its canonical ID."""
+    primary = [row for row in calendars() if row.get("primary") is True and row.get("accessRole") == "owner"]
+    if len(primary) != 1 or calendar_id not in ("primary", primary[0]["id"]):
+        raise GoogleError("Calendar writes are limited to the explicitly discovered primary calendar.")
+    return primary[0]["id"]
 
 
 def propose(args):

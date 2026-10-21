@@ -539,14 +539,32 @@ def cmd_show(args):
     state, cl = Day(day), Checklist()
     events, warnings = calendar_for(day, args, needed=False)
     items = sorted(events + state.blocks, key=lambda i: (not i.get("allday"), i["start"], i["end"]))
-    for s in (state, cl):
-        if s.bad:
-            print(f"warning: {s.path} has unparseable lines; they are not shown", file=sys.stderr)
+    warning_details = []
+    for source, current, code in (("schedule", state, "PLANNER_SCHEDULE_MALFORMED"),
+                                  ("checklist", cl, "PLANNER_CHECKLIST_MALFORMED")):
+        if current.bad:
+            message = f"Some local planner {source} entries could not be parsed; the view is incomplete."
+            warnings.append(message)
+            warning_details.append({"code": code, "source": source, "message": message,
+                                    "count": len(current.bad)})
+    if getattr(args, "no_calendar", False):
+        warning_details.append({"code": "CALENDAR_NOT_CHECKED", "source": "calendar",
+                                "message": "Calendar was not checked."})
+    elif warnings and not warning_details:
+        warning_details.append({"code": "CALENDAR_UNAVAILABLE", "source": "calendar",
+                                "message": "Calendar could not be read; schedule coverage is incomplete."})
+    elif any("Calendar" in warning for warning in warnings):
+        warning_details.append({"code": "CALENDAR_UNAVAILABLE", "source": "calendar",
+                                "message": "Calendar could not be read; schedule coverage is incomplete."})
+    data_status = "malformed" if state.bad or cl.bad else \
+                  "incomplete" if any(item["code"] == "CALENDAR_UNAVAILABLE" for item in warning_details) else "complete"
     if args.json:
         keep = ("kind", "id", "title", "start", "end", "allday", "free")  # no calendar addresses
         items = [{k: i[k] for k in keep if k in i} for i in items]
         print(json.dumps({"date": day.isoformat(), "schedule": items,
                           "warnings": warnings,
+                          "warning_details": warning_details, "data_status": data_status,
+                          "complete": data_status == "complete",
                           "checklist": [{"section": n, "tasks": ts} for n, ts in cl.sections]},
                          ensure_ascii=False, indent=1))
         return

@@ -1,10 +1,16 @@
 """Owner-side optional integration setup. Never imported by the agent plugin."""
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import tempfile
 import sys
 from urllib.parse import urlsplit
+
+try:
+    import fcntl
+except ImportError:  # Core commands must still import when optional Unix locking is unavailable.
+    fcntl = None
 
 PLUGIN_ID = "tari-dailygrad"
 PLUGIN_PATH = "/opt/tari-plugins/tari-dailygrad"
@@ -82,15 +88,7 @@ def selected_directory(raw, cli, create=False):
     return path
 
 
-def configure(args, cli):
-    env = cli.read_env()
-    if any(ord(char) < 32 or ord(char) == 127 for char in args.ollama_url):
-        raise ValueError("Ollama URL must not contain control characters")
-    url = urlsplit(args.ollama_url)
-    if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password or url.query or url.fragment:
-        raise ValueError("Use an http(s) Ollama base URL without embedded credentials")
-    if not args.ollama_model or len(args.ollama_model) > 200 or any(ord(c) < 32 for c in args.ollama_model):
-        raise ValueError("Invalid Ollama model identifier")
+def runtime_configuration(cli):
     path = cli.safe(cli.LOCAL / "state/openclaw.json")
     runtime = json.loads(path.read_text())
     if not isinstance(runtime, dict) or not isinstance(runtime.get("plugins", {}), dict):
@@ -100,10 +98,124 @@ def configure(args, cli):
             or not isinstance(plugins.get("load", {}).get("paths", []), list) \
             or not isinstance(plugins.get("allow", []), list):
         raise ValueError("OpenClaw plugin entries, load paths, and allow list have invalid types")
+    return path, runtime, plugins
+
+
+@contextmanager
+def configuration_lock(cli):
+    """Serialize owner configuration so one caller cannot restart another's old policy."""
+    if fcntl is None:
+        raise ValueError("DailyGrad configuration requires Unix file locking; use macOS, Linux, or WSL")
+    lock_path = cli.safe(cli.LOCAL / "dailygrad.configure.lock")
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise ValueError("DailyGrad configuration is already being changed; retry after it finishes") from error
+        # Retain the inode: deleting a lock file lets concurrent callers lock different files.
+        yield
+
+
+def runner_state(cli):
+    try:
+        return cli.running_service("dailygrad-runner")
+    except (OSError, ValueError):
+        return None
+
+
+def stop_runner_verified(cli, overlay=None):
+    """Stop this installation only; a zero command status alone does not prove revocation."""
+    prefix = ["-f", str(overlay)] if overlay is not None else []
+    try:
+        cli.compose(*prefix, "--profile", "dailygrad-runner", "stop", "dailygrad-runner")
+    except (OSError, ValueError):
+        pass
+    return runner_state(cli) is False
+
+
+def configure(args, cli):
+    # Reject bad input before changing services, creating a lock, or replacing saved policy.
+    cli.read_env()
+    if any(ord(char) < 32 or ord(char) == 127 for char in args.ollama_url):
+        raise ValueError("Ollama URL must not contain control characters")
+    url = urlsplit(args.ollama_url)
+    if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password or url.query or url.fragment:
+        raise ValueError("Use an http(s) Ollama base URL without embedded credentials")
+    if not args.ollama_model or len(args.ollama_model) > 200 or any(ord(c) < 32 for c in args.ollama_model):
+        raise ValueError("Invalid Ollama model identifier")
+    runtime_configuration(cli)
     data = selected_directory(args.data_dir, cli, create=True)
     if not data.is_dir():
         raise ValueError("Select a DailyGrad output directory")
+    with configuration_lock(cli):
+        return configure_locked(args, cli, data)
+
+
+def configure_locked(args, cli, data):
+    env = cli.read_env()
+    path, runtime, plugins = runtime_configuration(cli)
     base = location(cli)
+    saved_settings = cli.safe(base / "settings.json")
+    old_overlay = cli.safe(base / "compose.json")
+    prior_setup = saved_settings.exists() or old_overlay.exists() or PLUGIN_ID in plugins.get("entries", {})
+    was_running = runner_state(cli)
+    # First-time offline configuration is safe: this installation has never configured
+    # a runner. Once any retained setup exists, unknown state must be quiesced too.
+    if was_running is True or (was_running is None and prior_setup):
+        if not stop_runner_verified(cli, old_overlay if old_overlay.is_file() else None):
+            print("DailyGrad configuration was not applied: the optional runner could not be confirmed stopped. "
+                  "Existing runner permissions may still be active; restore Docker access and stop it before retrying.",
+                  file=sys.stderr)
+            return 1
+
+    try:
+        apply_saved_configuration(args, cli, data, env, path, runtime, plugins, base)
+    except (OSError, ValueError, KeyError, TypeError):
+        print("DailyGrad configuration could not be fully saved or applied. The optional runner was not restarted; "
+              "correct the setup and run configure again.", file=sys.stderr)
+        return 1
+
+    try:
+        applied = cli.recreate_running()
+    except (OSError, ValueError):
+        applied = 1
+    if applied:
+        print("Saved DailyGrad settings, but Tari container recreation failed. The optional runner was not restarted; "
+              "retry ./tari start and configure when Docker is available.", file=sys.stderr)
+        return applied
+
+    if was_running is True:
+        # Force recreation also refreshes the single-file TOML bind mount after atomic
+        # replacement, even when capability flags and the Compose path did not change.
+        overlay = cli.safe(base / "compose.json")
+        try:
+            result = cli.compose("-f", str(overlay), "--profile", "dailygrad-runner", "up", "-d",
+                                 "--no-build", "--force-recreate", "dailygrad-runner")
+        except (OSError, ValueError):
+            result = 1
+        if result or runner_state(cli) is not True:
+            stopped = stop_runner_verified(cli, overlay)
+            message = "DailyGrad runner reconciliation failed. "
+            message += ("The optional runner is confirmed stopped; saved settings remain for a later configure attempt."
+                        if stopped else "Runner shutdown could not be verified; do not rely on permission revocation "
+                        "until this installation's optional runner is confirmed stopped.")
+            print(message, file=sys.stderr)
+            return result or 1
+
+    print("DailyGrad configured. Digest reads are enabled; runner operations require their individual opt-ins.")
+    if applied is None:
+        print("No running Tari container was recreated; ./tari start applies the saved integration settings.")
+    else:
+        print("Recreated the running Tari container to apply integration settings.")
+    if was_running is True:
+        print("Recreated the optional runner with the saved settings; no digest generation was requested.")
+    else:
+        print("No optional runner was started. Start it explicitly with ./tari dailygrad runner-start.")
+    return 0
+
+
+def apply_saved_configuration(args, cli, data, env, path, runtime, plugins, base):
     base.mkdir(mode=0o700, exist_ok=True)
     cli.safe(base / "runner-state").mkdir(mode=0o700, exist_ok=True)
     # JSON string literals are valid TOML basic string literals for these values.
@@ -127,18 +239,9 @@ def configure(args, cli):
         "enabled": True, "dataDir": "/mnt/dailygrad", "runnerSocket": "/run/tari-dailygrad/runner.sock",
         "runWaitSeconds": 570, "timeZone": env.get("TARI_TIMEZONE", "UTC"), **value["capabilities"]}}
     write_json(cli, path, runtime)
-    compose_files(cli)
-    applied = cli.recreate_running()
-    print("DailyGrad configured. Digest reads are enabled; runner operations require their individual opt-ins.")
-    if applied is None:
-        print("No running Tari container was recreated; ./tari start applies the saved integration settings.")
-    elif applied:
-        print("Saved DailyGrad settings, but Tari container recreation failed; retry ./tari start.", file=sys.stderr)
-        return applied
-    else:
-        print("Recreated the running Tari container to apply integration settings.")
-    print("Start the optional runner with ./tari dailygrad runner-start.")
-    return 0
+    # Configuration must validate fully here; the core-only degraded overlay is for
+    # ordinary startup, not evidence that runner policy was successfully reconciled.
+    configured_compose_files(cli)
 
 
 def compose_files(cli):

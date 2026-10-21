@@ -4,3 +4,8 @@
 !docker/Dockerfile.dailygrad
 !scripts/
 !scripts/dailygrad_runner.py
+!scripts/tari_automation.py
+!plugins/
+!plugins/tari-workflows/
+!plugins/tari-workflows/*.js
+!plugins/tari-workflows/*.json

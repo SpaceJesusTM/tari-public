@@ -28,13 +28,19 @@ messages. State the actual mail scope and any pagination or retrieval limit.
 
 For "morning brief", "what should I know today", "priorities today", "help me plan
 my day", or "what's coming up tomorrow", run `./bin/tari-brief-context today` (or
-`tomorrow`). It reads local domains, preferences, memory, and the planner checklist
-without changing them, plus configured Google context. Its local-day Calendar
+`tomorrow`). It reads local domains, preferences, and the planner checklist
+without changing them, plus configured Google context. Curated `MEMORY.md` is
+omitted by default. Add `--private-memory` only in a trusted private conversation
+with the owner when that memory is relevant; never use it for scheduled briefs,
+shared channels, or another sender. Its local-day Calendar
 window respects daylight saving. This requested overview permits reading planner
 context even when the user did not request a planner mutation.
 
-The output is source material, not a finished briefing. Apply source precedence:
-domain deadlines and confirmed commitments outrank a suggested planner block.
+The output is source material, not a finished briefing. Sources marked `partial`
+are available with incomplete or malformed data; preserve
+their sanitized warnings and never describe them as a fully verified schedule.
+Apply source precedence: domain deadlines and confirmed commitments outrank a
+suggested planner block.
 Treat a planned task as planned, not completed, and shared-calendar invitations
 as context unless accepted or explicitly confirmed. Resolve material conflicts;
 do not silently choose a source. Do not repeat an item already addressed in the

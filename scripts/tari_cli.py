@@ -323,15 +323,43 @@ def workspace_update(instructions=False):
     return 0
 
 
-def dailygrad_cli():
-    path = safe(ROOT / "scripts/dailygrad_setup.py")
+def optional_cli(name):
+    if name not in {"dailygrad", "automation"}:
+        raise ValueError("Unknown local integration")
+    path = safe(ROOT / f"scripts/{name}_setup.py")
     if not path.is_file():
         return None
-    spec = importlib.util.spec_from_file_location("tari_dailygrad_setup", path)
+    spec = importlib.util.spec_from_file_location(f"tari_{name}_setup", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def dailygrad_cli():
+    return optional_cli("dailygrad")
+
+
+def openclaw_json(*arguments, timeout=45):
+    """Call this installation's native CLI; never expose raw diagnostics or secrets."""
+    command, environment = compose_invocation("exec", "-T", "tari", "openclaw", *arguments)
+    try:
+        result = subprocess.run(command, cwd=ROOT, env=environment, capture_output=True,
+                                text=True, timeout=timeout)
+        if result.returncode or len(result.stdout.encode()) > 1048576:
+            raise ValueError()
+        decoder = json.JSONDecoder()
+        for match in re.finditer(r"(?m)^[\[{]", result.stdout):
+            try:
+                value, _ = decoder.raw_decode(result.stdout, match.start())
+                if isinstance(value, (dict, list)):
+                    return value
+            except ValueError:
+                continue
+        raise ValueError()
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        raise ValueError("Native OpenClaw request could not be verified. Check this installation's status; "
+                         "a timed-out change has an unknown outcome and must not be blindly retried.") from None
 
 
 def chat_request(message, session, env=None):
@@ -465,6 +493,9 @@ def main():
     dailygrad = dailygrad_cli()
     if dailygrad:
         dailygrad.register_parser(sub)
+    automation = optional_cli("automation")
+    if automation:
+        automation.register_parser(sub)
     for name in ["build", "start", "stop", "status", "logs", "doctor", "token"]:
         sub.add_parser(name)
     chat = sub.add_parser("chat", help="Interactive chat; /quit exits")
@@ -482,6 +513,8 @@ def main():
         return workspace_update(args.instructions)
     elif args.command == "dailygrad":
         return dailygrad.dispatch(args, SimpleNamespace(**globals()))
+    elif args.command in {"automation", "morning-brief", "reminders"}:
+        return automation.dispatch(args, SimpleNamespace(**globals()))
     elif args.command == "doctor":
         return doctor()
     elif args.command == "token":
