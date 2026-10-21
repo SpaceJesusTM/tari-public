@@ -32,7 +32,7 @@ model is `openai/gpt-6.1-sol`.
 > `main`, omit `--branch feat/tari-public-v0` from the clone command.
 
 ```sh
-git clone --branch feat/tari-public-v0 https://github.com/SpaceJesusTM/tari-public.git
+git clone https://github.com/SpaceJesusTM/tari-public.git
 cd tari-public
 ./tari init --timezone UTC
 ```
