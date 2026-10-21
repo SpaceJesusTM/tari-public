@@ -87,6 +87,11 @@ def main():
                 assert error.code == 401
             assert "openclaw/tari" in [item["id"] for item in request("/v1/models")["data"]]
             compose("exec", "-T", "tari", "openclaw", "config", "validate")
+            auth_state, _ = cli.model_auth_status()
+            # Native runtime auth can be indeterminate while the Gateway owns
+            # the store. Preserve that uncertainty; no credentials were supplied.
+            assert auth_state in {"missing", "unverified", "unavailable"}, "Credential-free fixture must not report model readiness"
+            print("PASS credential-free model status: " + auth_state + "; no inference was attempted")
             identity = compose("exec", "-T", "tari", "cat", "IDENTITY.md").stdout
             assert "Tari" in identity
             compose("exec", "-T", "tari", "./bin/day-planner", "add", "tomorrow", "13:00-14:00", "Fictional prototype", "--no-calendar")

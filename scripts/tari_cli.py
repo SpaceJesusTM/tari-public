@@ -142,7 +142,7 @@ def initialize(args):
                     target.chmod(0o700)
                 count += 1
     print(f"Initialized private .local/; seeded {count} missing workspace files. Existing files preserved.")
-    print("Add your model API key to .local/runtime.env, then ./tari start")
+    print("Configure model authentication, then ./tari start; see docs/setup.md")
 
 
 def compose_invocation(*args, validate_zone=True):
@@ -361,6 +361,46 @@ def chat_request(message, session, env=None):
         raise ValueError(f"Gateway returned HTTP {exc.code}; inspect ./tari logs locally") from None
 
 
+def model_auth_status():
+    """Inspect this installation's configured routes, never probe model inference.
+
+    OpenClaw supports env/config secrets, managed OAuth/API-key profiles, and local
+    providers. Its --check result is authoritative; env-key presence alone is not.
+    Never relay raw stdout/stderr, which can contain credential-source details.
+    """
+    try:
+        command, environment = compose_invocation(
+            "exec", "-T", "tari", "openclaw", "models", "status",
+            "--agent", "tari", "--json", "--check",
+        )
+        result = subprocess.run(command, cwd=ROOT, env=environment, capture_output=True, text=True, timeout=45)
+        status = json.loads(result.stdout)
+        auth = status.get("auth") if isinstance(status, dict) else None
+        if not isinstance(auth, dict) or not isinstance(status.get("resolvedDefault"), str):
+            raise ValueError()
+        routes = auth.get("runtimeAuthRoutes", [])
+        issues = auth.get("modelRouteIssues", [])
+        if not isinstance(routes, list) or not isinstance(issues, list):
+            raise ValueError()
+        states = {row.get("status") for row in routes if isinstance(row, dict) and isinstance(row.get("status"), str)}
+        issue_codes = {row.get("code") for row in issues if isinstance(row, dict) and isinstance(row.get("code"), str)}
+        if "incompatible" in states or issue_codes & {"incompatible", "unknown_provider", "unknown_model", "unsupported_provider", "unsupported_model"}:
+            return "unsupported", "a configured model route is unsupported or incompatible"
+        if "unavailable" in states:
+            return "unavailable", "a configured model runtime is unavailable"
+        if "expired" in states:
+            return "expired", "authentication for a configured route has expired"
+        if auth.get("missingProvidersInUse") or "missing" in states:
+            return "missing", "credentials are missing for a configured model route"
+        if result.returncode == 2 or "expiring" in states:
+            return "expiring", "a selected credential expires soon"
+        if result.returncode == 0 and not issues and not states & {"indeterminate", "unknown"}:
+            return "configured", "OpenClaw auth/config check passed; live inference unverified"
+        return "unverified", "OpenClaw could not confirm configured-route readiness"
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return "unverified", "could not inspect OpenClaw model status; start Tari and retry"
+
+
 def doctor():
     env = read_env()
     failures = []
@@ -374,8 +414,6 @@ def doctor():
             daemon_ok = False
         if not daemon_ok:
             failures.append("Docker daemon unavailable")
-    if not any(env.get(key) for key in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"]):
-        failures.append("No model API key configured (use OpenClaw provider auth for other models)")
     for rel in ["state/openclaw.json", "state/workspace/AGENTS.md", "state/workspace/bin/day-planner"]:
         if not safe(LOCAL / rel).is_file():
             failures.append("Missing runtime file: " + rel)
@@ -393,6 +431,10 @@ def doctor():
     print("Private state: .local/ | agent: tari | loopback port: " + env["TARI_PORT"])
     print("Timezone: " + env["TARI_TIMEZONE"] + " (TARI_TIMEZONE; default UTC)")
     print("Google account configured: " + ("yes" if env.get("TARI_GOOGLE_ACCOUNT") else "no (optional)"))
+    auth_state, auth_detail = model_auth_status()
+    print("Model auth: " + auth_state + " — " + auth_detail)
+    if auth_state != "configured":
+        failures.append("Model readiness needs attention; inspect ./tari openclaw models status --agent tari")
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(f"http://127.0.0.1:{env['TARI_PORT']}/healthz", timeout=3) as response:
@@ -463,11 +505,6 @@ def main():
         executable = [] if args.command == "exec" else [args.command]
         return compose("exec", "tari", *executable, *extra)
     elif args.command == "start":
-        env = read_env()
-        provider = env["TARI_MODEL"].split("/", 1)[0]
-        key_name = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "openrouter": "OPENROUTER_API_KEY"}.get(provider)
-        if key_name and not env.get(key_name):
-            print(f"No {key_name} in .local/runtime.env; chat needs your provider credentials.", file=sys.stderr)
         return compose("up", "-d", "--build", "tari")
     else:
         commands = {"build": ["build", "tari"], "stop": ["down", "--remove-orphans", "--timeout", "360"], "status": ["ps"], "logs": ["logs", "--tail", "100", "tari"]}
