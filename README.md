@@ -1,4 +1,4 @@
-# Tari
+# TARI
 
 **Thoughtful Assistant for Routine & Information**
 
