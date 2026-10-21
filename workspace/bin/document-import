@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""Explicit local document intake with source provenance; never writes assistant memory."""
+import argparse
+from datetime import datetime, timezone
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import resource
+import shutil
+import subprocess
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+import zipfile
+
+MAX_BYTES = 20 * 1024 * 1024
+MAX_TEXT = 2 * 1024 * 1024
+MAX_XML = 8 * 1024 * 1024
+FORMATS = {".txt", ".md", ".pdf", ".docx"}
+
+
+class DocumentError(Exception):
+    pass
+
+
+def pdf_limits():
+    """The Docker/Linux worker cannot expand a compact PDF without bounds."""
+    resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_TEXT + 1, MAX_TEXT + 1))
+    resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
+    if sys.platform.startswith("linux"):
+        resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
+
+
+def workspace():
+    return Path(os.environ.get("TARI_WORKSPACE", Path(__file__).absolute().parent.parent)).absolute()
+
+
+def safe_path(path, root):
+    """Reject escape and every symlink component before reading anything."""
+    path, root = Path(os.path.abspath(path)), Path(os.path.abspath(root))
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise DocumentError("Document must be inside workspace/inbox; copy it there explicitly first.") from exc
+    for component in (root, *[root.joinpath(*relative.parts[:i]) for i in range(1, len(relative.parts) + 1)]):
+        if component.is_symlink():
+            raise DocumentError("Document paths must not use symlinks.")
+    # Check root's ancestors too, without traversing directory contents.
+    if any(parent.is_symlink() for parent in root.parents):
+        raise DocumentError("Document roots must not use symlinks.")
+    return path
+
+
+def extract(data, suffix):
+    if suffix in (".txt", ".md"):
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise DocumentError("Text documents must use UTF-8 encoding.") from exc
+        if "\x00" in text:
+            raise DocumentError("Binary content is not supported as text.")
+    elif suffix == ".docx":
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                if len(archive.infolist()) > 2000 or sum(i.file_size for i in archive.infolist()) > 50 * 1024 * 1024:
+                    raise DocumentError("DOCX archive exceeds extraction limits.")
+                info = archive.getinfo("word/document.xml")
+                if info.file_size > MAX_XML:
+                    raise DocumentError("DOCX text exceeds extraction limits.")
+                xml = archive.read(info)
+                if b"<!DOCTYPE" in xml.upper() or b"<!ENTITY" in xml.upper():
+                    raise DocumentError("DOCX contains unsupported XML declarations.")
+                document = ET.fromstring(xml)
+                namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+                text = "\n".join("".join(p.itertext()) for p in document.iter(namespace + "p"))
+        except (zipfile.BadZipFile, KeyError, ET.ParseError, RuntimeError) as exc:
+            raise DocumentError("DOCX could not be safely extracted.") from exc
+    else:
+        if not data.startswith(b"%PDF-"):
+            raise DocumentError("File does not contain a PDF header.")
+        if not shutil.which("pdftotext"):
+            raise DocumentError("PDF extraction needs pdftotext (poppler-utils in the Docker image).")
+        temporary = safe_path(workspace() / "state" / "document-tmp", workspace())
+        temporary.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            with tempfile.TemporaryFile(dir=temporary) as output:
+                result = subprocess.run(["pdftotext", "-f", "1", "-l", "200", "-layout", "-", "-"],
+                                        input=data, stdout=output, stderr=subprocess.DEVNULL,
+                                        preexec_fn=pdf_limits, timeout=30, check=False)
+                output.seek(0)
+                extracted = output.read(MAX_TEXT + 1)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise DocumentError("PDF extraction failed or timed out.") from exc
+        if result.returncode:
+            raise DocumentError("PDF extraction failed; encrypted or damaged PDFs need owner review.")
+        text = extracted.decode("utf-8", errors="replace")
+    if len(text.encode("utf-8")) > MAX_TEXT:
+        raise DocumentError("Extracted text exceeds the 2 MiB limit; split the document first.")
+    if not text.strip():
+        raise DocumentError("No readable text found; scanned PDFs need a separate explicit OCR step.")
+    return text
+
+
+def import_document(source, label=None):
+    root = workspace()
+    source = safe_path(source, root / "inbox")
+    suffix = source.suffix.lower()
+    if suffix not in FORMATS or not source.is_file():
+        raise DocumentError("Use a regular TXT, Markdown, PDF, or DOCX file inside workspace/inbox.")
+    with source.open("rb") as handle:
+        data = handle.read(MAX_BYTES + 1)
+    if len(data) > MAX_BYTES:
+        raise DocumentError("Document exceeds the 20 MiB input limit.")
+    text = extract(data, suffix)
+    digest = hashlib.sha256(data).hexdigest()
+    target = safe_path(root / "documents" / digest, root)
+    if target.exists():
+        metadata = json.loads(safe_path(target / "provenance.json", root).read_text(encoding="utf-8"))
+        return {"document": metadata, "already_imported": True, "untrusted_content": True}
+    target.mkdir(mode=0o700, parents=True)
+    metadata = {"id": digest, "sha256": digest, "source_name": source.name,
+                "source_path": str(source.relative_to(root)), "label": label or source.name,
+                "imported_at": datetime.now(timezone.utc).isoformat(), "format": suffix.lstrip("."),
+                "input_bytes": len(data), "text_characters": len(text),
+                "extraction": "pdftotext first 200 pages" if suffix == ".pdf" else "local text extraction",
+                "memory_saved": False, "untrusted_content": True}
+    try:
+        for name, content in (("source" + suffix, data), ("text.txt", text.encode("utf-8")),
+                              ("provenance.json", json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8"))):
+            path = target / name
+            with path.open("xb") as handle:
+                os.chmod(path, 0o600)
+                handle.write(content)
+    except OSError:
+        # A partial intake is distinguishable because provenance is written last.
+        raise DocumentError("Document storage failed; inspect the local document directory before retrying.")
+    return {"document": metadata, "preview": text[:2000], "preview_truncated": len(text) > 2000,
+            "untrusted_content": True}
+
+
+def show_document(document_id, limit):
+    if not re.fullmatch(r"[a-f0-9]{64}", document_id) or not 1 <= limit <= 100000:
+        raise DocumentError("Use a document SHA-256 ID and --max-chars between 1 and 100000.")
+    root = workspace()
+    target = safe_path(root / "documents" / document_id, root)
+    metadata = json.loads(safe_path(target / "provenance.json", root).read_text(encoding="utf-8"))
+    text = safe_path(target / "text.txt", root).read_text(encoding="utf-8")
+    return {"document": metadata, "text": text[:limit], "truncated": len(text) > limit,
+            "untrusted_content": True}
+
+
+def list_documents(limit=20):
+    if not 1 <= limit <= 100:
+        raise DocumentError("Use --max between 1 and 100.")
+    root = workspace()
+    directory = safe_path(root / "documents", root)
+    if not directory.exists():
+        return {"documents": [], "truncated": False, "untrusted_content": True}
+    rows = []
+    for index, candidate in enumerate(directory.iterdir()):
+        if index >= 10000:
+            raise DocumentError("Too many document entries; review the local document directory.")
+        if not re.fullmatch(r"[a-f0-9]{64}", candidate.name):
+            continue
+        safe_path(candidate, root)
+        metadata_path = safe_path(candidate / "provenance.json", root)
+        if not metadata_path.exists():
+            continue  # Incomplete intakes have no provenance and are never presented as complete.
+        if metadata_path.stat().st_size > 16384:
+            raise DocumentError("Document metadata exceeds the safe size limit.")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        rows.append(metadata)
+    rows.sort(key=lambda row: str(row.get("imported_at", "")), reverse=True)
+    return {"documents": rows[:limit], "truncated": len(rows) > limit,
+            "total": len(rows), "untrusted_content": True}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="action", required=True)
+    intake = commands.add_parser("import")
+    intake.add_argument("source")
+    intake.add_argument("--label")
+    show = commands.add_parser("show")
+    show.add_argument("document_id")
+    show.add_argument("--max-chars", type=int, default=12000)
+    listing = commands.add_parser("list")
+    listing.add_argument("--max", type=int, default=20)
+    args = parser.parse_args(argv)
+    try:
+        if args.action == "import":
+            result = import_document(args.source, args.label)
+        elif args.action == "show":
+            result = show_document(args.document_id, args.max_chars)
+        else:
+            result = list_documents(args.max)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    except (DocumentError, OSError, ValueError) as exc:
+        # Error details avoid extracted contents and absolute owner paths.
+        message = str(exc) if isinstance(exc, DocumentError) else "Document unavailable or metadata invalid."
+        print(json.dumps({"error": message}), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,872 @@
+#!/usr/bin/env python3
+"""Tari's local day planner. Deterministic; never invokes a model.
+
+Planner and commute blocks live in planner/days/YYYY-MM-DD.md next to bin/.
+The persistent categorized checklist lives in planner/checklist.md.
+Calendar commitments are read live through tari-google and never stored here.
+This helper cannot create, modify, or delete Calendar events.
+
+    day-planner show [DAY] [--schedule] [--json]
+    day-planner free [DAY] [--after TIME] [--before TIME] [--min DURATION]
+    day-planner excluded [DAY]                 # diagnostic, on request only
+    day-planner add DAY RANGE TITLE... [--allow-overlap]
+    day-planner place DAY DURATION TITLE... [--after TIME] [--before TIME]
+    day-planner move DAY REF [RANGE] [--to-day DAY] [--allow-overlap]
+    day-planner resize DAY REF DURATION [--keep-end] [--allow-overlap]
+    day-planner rename DAY REF TITLE... | remove DAY REF
+    day-planner commute-add DAY to|home ANCHOR [--duration DURATION] [--label TEXT]
+    day-planner checklist [--status STATUS] [--section NAME] [--all] [--json]
+    day-planner section-add NAME... | section-remove NAME...
+    day-planner task-add SECTION TEXT... [--status STATUS] [--create]
+    day-planner task-status REF STATUS | task-rename REF TEXT...
+    day-planner task-complete REF | task-reopen REF | task-remove REF
+
+DAY: today | tomorrow | YYYY-MM-DD (in TARI_TIMEZONE, default UTC).
+TIME: 13:00, 9:30am, 1pm; a bare 1 is refused.
+RANGE: 13:00-14:00 or 13:00+90m. DURATION: 90m, 2h, 1h30m.
+REF: block/task id, unique title text, or block start time @16:00.
+STATUS: priority | start | in-progress | none.
+ANCHOR: time or unique title of a counted Calendar event or Planner block.
+
+Calendar reads need TARI_GOOGLE_ACCOUNT or GOG_ACCOUNT. Calendar commands accept
+--count EVENT_ID to include a particular shared event, and --no-calendar only
+when the user has explicitly agreed to proceed without Calendar checks.
+--allow-overlap requires confirmation of the specific overlap.
+
+Exit: 0 success, 2 bad input or ambiguous reference, 3 Calendar unreadable or
+incomplete, 4 overlap/no free slot (nothing written), 5 malformed state.
+Run any subcommand with --help for its complete options.
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from datetime import date, datetime, time, timedelta
+
+ROOT = os.environ.get("TARI_PLANNER_DIR") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "planner")
+GOOGLE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "tari-google")
+TZ_NAME = os.environ.get("TARI_TIMEZONE", "UTC")
+DAY_START, DAY_END = "08:00", "22:00"   # default window for free / place
+
+ICON = {"calendar": "📅", "planner": "📝", "commute": "🚇"}
+STATUS = {"priority": ("Priority", "🔴"), "start": ("Start", "🔵"), "in-progress": ("In-progress", "🟢")}
+NO_STATUS, DONE = "⚪", "✅"
+
+BLOCK = re.compile(r"^- (\d{2}:\d{2})-(\d{2}:\d{2}) \| (planner|commute) \| (.+?)(?:\s*<!-- (b\d+) -->)?\s*$")
+TASK = re.compile(r"^- \[([ xX])\] (?:\[(Priority|Start|In-progress)\] )?(.+?)(?:\s*<!-- (t\d+) -->)?\s*$")
+NEXT_ID = re.compile(r"^<!-- next-id: (\d+) -->\s*$")
+TIME = re.compile(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$", re.I)
+DUR = re.compile(r"^(?:(\d+)h)?(?:(\d+)m)?$", re.I)
+
+
+class Fail(Exception):
+    def __init__(self, msg, code=2):
+        super().__init__(msg)
+        self.code = code
+
+
+def tz():
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(TZ_NAME)
+    except (ImportError, ValueError, KeyError) as error:
+        raise Fail(f"Invalid TARI_TIMEZONE {TZ_NAME!r}; use an IANA zone such as UTC or Europe/London") from error
+
+
+def now():
+    pinned = os.environ.get("TARI_PLANNER_NOW")  # tests only
+    if pinned:
+        dt = datetime.fromisoformat(pinned)
+        return dt.astimezone(tz()) if dt.tzinfo else dt.replace(tzinfo=tz())
+    return datetime.now(tz())
+
+
+# ------------------------------------------------------------------ parsing --
+def parse_day(s):
+    key = s.strip().lower()
+    today = now().date()
+    if key == "today":
+        return today
+    if key == "tomorrow":
+        return today + timedelta(days=1)
+    try:
+        return date.fromisoformat(key)
+    except ValueError:
+        raise Fail(f"'{s}' is not a day; use today, tomorrow or YYYY-MM-DD")
+
+
+def parse_time(s, end=False):
+    m = TIME.match(s.strip())
+    if not m:
+        raise Fail(f"'{s}' is not a time; use 13:00, 9:30am or 1pm")
+    h, mi, ap = int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "").lower()
+    if ap:
+        if not 1 <= h <= 12:
+            raise Fail(f"'{s}' is not a valid 12-hour time")
+        h = h % 12 + (12 if ap == "pm" else 0)
+    elif m.group(2) is None:
+        raise Fail(f"'{s}' is ambiguous; write it as {h}:00 (24-hour), {h}am or {h}pm")
+    mins = h * 60 + mi
+    if h > 24 or mi > 59 or mins > 1440 or (mins == 1440 and not end):
+        raise Fail(f"'{s}' is not a valid time of day")
+    return mins
+
+
+def parse_dur(s):
+    m = DUR.match(s.strip())
+    mins = int(m.group(1) or 0) * 60 + int(m.group(2) or 0) if m and s.strip() else 0
+    if mins <= 0:
+        raise Fail(f"'{s}' is not a duration; use 90m, 2h or 1h30m")
+    return mins
+
+
+def parse_range(s):
+    s = s.strip().replace("–", "-").replace("—", "-")
+    if "+" in s:
+        a, d = s.split("+", 1)
+        start = parse_time(a)
+        end = start + parse_dur(d)
+    elif "-" in s:
+        a, b = s.split("-", 1)
+        start, end = parse_time(a), parse_time(b, end=True)
+    else:
+        raise Fail(f"'{s}' is not a time range; use 13:00-14:00 or 13:00+90m")
+    return check_span(start, end)
+
+
+def check_span(start, end):
+    if end <= start:
+        raise Fail(f"end {hhmm(end)} is not after start {hhmm(start)}; blocks stay within one day")
+    if start < 0 or end > 1440:
+        raise Fail("that block would cross midnight; blocks stay within one day")
+    return start, end
+
+
+def parse_status(s):
+    key = re.sub(r"[\s_]+", "-", s.strip().lower()).replace("inprogress", "in-progress")
+    if key in ("none", ""):
+        return None
+    if key not in STATUS:
+        raise Fail(f"'{s}' is not a status; use Priority, Start, In-progress or none")
+    return STATUS[key][0]
+
+
+def clean(words, what, forbid="\n"):
+    raw = words if isinstance(words, str) else " ".join(words)
+    if "\n" in raw or "\r" in raw:
+        raise Fail(f"{what} must be a single line")
+    text = " ".join(raw.split())
+    if not text:
+        raise Fail(f"{what} is empty")
+    for bad in ("<!--", "-->") + tuple(forbid):
+        if bad in text:
+            raise Fail(f"{what} cannot contain '{bad}'")
+    return text
+
+
+# --------------------------------------------------------------- formatting --
+def hhmm(m):
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
+def clock(m):
+    h = (m // 60) % 24
+    return f"{h % 12 or 12}:{m % 60:02d}", ("AM" if h < 12 else "PM")
+
+
+def span(start, end):
+    (a, ap), (b, bp) = clock(start), clock(end)
+    return f"{a}–{b} {bp}" if ap == bp else f"{a} {ap}–{b} {bp}"
+
+
+def day_title(day):
+    text = f"{day.strftime('%A, %b')} {day.day}"
+    return {0: "Today — ", 1: "Tomorrow — "}.get((day - now().date()).days, "") + text
+
+
+def line(item):
+    when = "All day" if item.get("allday") else span(item["start"], item["end"])
+    return f"{when}  {ICON[item['kind']]} {item['title']}"
+
+
+def minutes(n):
+    h, m = divmod(n, 60)
+    return (f"{h}h" if h else "") + (f"{m}m" if m or not h else "")
+
+
+# -------------------------------------------------------------------- state --
+def write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".planner-")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def read_lines(path):
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return f.read().splitlines()
+
+
+def malformed(path, bad):
+    """Refuse to write over lines this helper cannot represent; reads carry on."""
+    return Fail(f"{path} has lines the planner cannot parse; nothing was changed. "
+                f"Fix or remove them first:\n" + "\n".join(f"  line {n}: {t}" for n, t in bad), 5)
+
+
+class Day:
+    def __init__(self, day):
+        self.day, self.path = day, os.path.join(ROOT, "days", f"{day.isoformat()}.md")
+        self.blocks, self.bad, self.next = [], [], 1
+        counter = None
+        for n, raw in enumerate(read_lines(self.path) or [], 1):
+            text = raw.strip()
+            m = BLOCK.match(text)
+            if m and m.group(1) < m.group(2) <= "24:00" and m.group(1)[3:] < "60" and m.group(2)[3:] < "60":
+                a, b = (int(x[:2]) * 60 + int(x[3:]) for x in m.group(1, 2))
+                self.blocks.append({"id": m.group(5), "kind": m.group(3), "start": a, "end": b,
+                                    "title": m.group(4)})
+            elif NEXT_ID.match(text):
+                counter = int(NEXT_ID.match(text).group(1))
+            elif text and not text.startswith("# Day Plan") and text != "## Schedule":
+                self.bad.append((n, raw))
+        ids = [b["id"] for b in self.blocks if b["id"]]
+        if len(ids) != len(set(ids)):
+            self.bad.append((0, "duplicate block ids"))
+        self.next = max([counter or 1] + [int(i[1:]) + 1 for i in ids])
+        for b in self.blocks:  # hand-written lines get an id on the next write
+            b["id"] = b["id"] or self.new_id()
+        self.sort()
+
+    def new_id(self):
+        self.next += 1
+        return f"b{self.next - 1}"
+
+    def sort(self):
+        self.blocks.sort(key=lambda b: (b["start"], b["end"], b["title"].lower()))
+
+    def save(self):
+        if self.bad:
+            raise malformed(self.path, self.bad)
+        self.sort()
+        rows = [f"- {hhmm(b['start'])}-{hhmm(b['end'])} | {b['kind']} | {b['title']} <!-- {b['id']} -->"
+                for b in self.blocks]
+        write(self.path, "\n".join([f"# Day Plan — {self.day.isoformat()}", "",
+                                    f"<!-- next-id: {self.next} -->", "", "## Schedule", ""] + rows) + "\n")
+
+    def find(self, ref):
+        ref = ref.strip()
+        hits = [b for b in self.blocks if b["id"] == ref.lower()]
+        if not hits and TIME.match(ref.lstrip("@")) and (ref.startswith("@") or ":" in ref or ref[-1:].lower() == "m"):
+            at = parse_time(ref.lstrip("@"))
+            hits = [b for b in self.blocks if b["start"] == at]
+        if not hits:
+            hits = [b for b in self.blocks if b["title"].lower() == ref.lower()] \
+                or [b for b in self.blocks if ref.lower() in b["title"].lower()]
+        if len(hits) == 1:
+            return hits[0]
+        listing = "\n".join(f"  {b['id']}  {line(b)}" for b in (hits or self.blocks)) or "  (no blocks that day)"
+        if hits:
+            raise Fail(f"'{ref}' matches {len(hits)} blocks on {self.day}; use the id:\n{listing}")
+        raise Fail(f"no Planner or Commute block matches '{ref}' on {self.day}. Calendar events are "
+                   f"never changed by the planner. Blocks that day:\n{listing}")
+
+
+class Checklist:
+    def __init__(self):
+        self.path = os.path.join(ROOT, "checklist.md")
+        self.sections, self.bad, counter = [], [], None  # sections: [name, [task, ...]]
+        for n, raw in enumerate(read_lines(self.path) or [], 1):
+            text = raw.strip()
+            m = TASK.match(text)
+            if text.startswith("## ") and text[3:].strip():
+                self.sections.append([text[3:].strip(), []])
+            elif m and self.sections:
+                self.sections[-1][1].append({"id": m.group(4), "done": m.group(1) != " ",
+                                             "status": m.group(2), "text": m.group(3)})
+            elif NEXT_ID.match(text):
+                counter = int(NEXT_ID.match(text).group(1))
+            elif text and text != "# Planner Checklist":
+                self.bad.append((n, raw))
+        ids = [t["id"] for t in self.tasks() if t["id"]]
+        names = [s[0].lower() for s in self.sections]
+        if len(ids) != len(set(ids)) or len(names) != len(set(names)):
+            self.bad.append((0, "duplicate task ids or section names"))
+        self.next = max([counter or 1] + [int(i[1:]) + 1 for i in ids])
+        for t in self.tasks():
+            if not t["id"]:
+                t["id"], self.next = f"t{self.next}", self.next + 1
+
+    def tasks(self):
+        return [t for _, ts in self.sections for t in ts]
+
+    def save(self):
+        if self.bad:
+            raise malformed(self.path, self.bad)
+        out = ["# Planner Checklist", "", f"<!-- next-id: {self.next} -->"]
+        for name, ts in self.sections:
+            out += ["", f"## {name}", ""]
+            out += [f"- [{'x' if t['done'] else ' '}] " + (f"[{t['status']}] " if t["status"] else "")
+                    + f"{t['text']} <!-- {t['id']} -->" for t in ts]
+        write(self.path, "\n".join(out) + "\n")
+
+    def section(self, name, required=True):
+        squash = lambda s: re.sub(r"\s+", "", s.lower())
+        hits = [s for s in self.sections if squash(s[0]) == squash(name)] \
+            or [s for s in self.sections if name.lower() in s[0].lower()]
+        if len(hits) == 1:
+            return hits[0]
+        names = ", ".join(s[0] for s in (hits or self.sections)) or "(none yet)"
+        if hits:
+            raise Fail(f"'{name}' matches several sections: {names}")
+        if required:
+            raise Fail(f"no checklist section matches '{name}'. Sections: {names}")
+        return None
+
+    def find(self, ref, section=None):
+        pool = [(s[0], t) for s in ([self.section(section)] if section else self.sections) for t in s[1]]
+        ref = ref.strip()
+        hits = [p for p in pool if p[1]["id"] == ref.lower()]
+        for done in (False, True):  # prefer open tasks; fall back to completed ones
+            for exact in (True, False):
+                if not hits:
+                    hits = [p for p in pool if p[1]["done"] == done and
+                            (p[1]["text"].lower() == ref.lower() if exact else ref.lower() in p[1]["text"].lower())]
+        if len(hits) == 1:
+            return hits[0]
+        if hits:
+            raise Fail(f"'{ref}' matches {len(hits)} tasks; use the id:\n"
+                       + "\n".join(f"  {t['id']}  {name}: {t['text']}" for name, t in hits))
+        raise Fail(f"no checklist task matches '{ref}'")
+
+
+# ----------------------------------------------------------------- calendar --
+def read_calendar(day, count_ids=()):
+    """Live Calendar events for one local day -> (items, not_counted, warnings, notes).
+
+    `items` are the events that occupy the user's time: those on the user's own
+    calendar, shared-calendar events the user has accepted, and any id in count_ids.
+    Everything else (shared calendars, declined invitations) is returned in
+    `not_counted` and never blocks time - the shared-calendar rules.
+
+    `warnings` are user-facing and never name another person's calendar or
+    event. Detail about those goes to `notes`, which only `excluded` prints.
+    """
+    account = (os.environ.get("TARI_GOOGLE_ACCOUNT") or os.environ.get("GOG_ACCOUNT") or "").strip().lower()
+    if not account:
+        raise Fail("Calendar could not be read: TARI_GOOGLE_ACCOUNT or GOG_ACCOUNT is not set, so the user's own "
+                   "calendar cannot be told apart from shared ones.", 3)
+    zone = tz()
+    lo = datetime.combine(day, time(0), zone)
+    hi = datetime.combine(day + timedelta(days=1), time(0), zone)
+    cmd = [GOOGLE, "calendar", "list", "--start", lo.isoformat(), "--end", hi.isoformat(), "--json"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise Fail(f"Calendar could not be read: {e}", 3)
+    try:
+        data = json.loads(proc.stdout)
+    except (ValueError, TypeError):
+        data = None
+    if proc.returncode != 0 or not isinstance(data, dict) or not isinstance(data.get("events"), list):
+        raise Fail(f"Calendar could not be read (tari-google exit {proc.returncode}); "
+                   "check Google setup and retry.", 3)
+
+    warnings, notes = [], []
+    for l in proc.stderr.splitlines():  # detect a partial upstream result as well
+        m = re.match(r"\s*calendar (\S+): (.*)", l)
+        if m and m.group(1).lower() in ("primary", account):
+            warnings.append("Calendar may be incomplete: your own calendar could not be fully read.")
+        elif m:
+            notes.append(f"shared calendar could not be read: {l.strip()}")
+    if data.get("nextPageTokens") or data.get("nextPageToken"):
+        warnings.append("Calendar may be incomplete: more pages were not fetched")
+    if data.get("complete") is False or data.get("incomplete") or data.get("warnings"):
+        warnings.append("Calendar may be incomplete: the Calendar reader reported a warning")
+    if warnings:
+        raise Fail("Calendar could not be read completely. " + " ".join(warnings), 3)
+
+    seen, counted, skipped = {}, [], []
+    for ev in data.get("events") or []:
+        if not isinstance(ev, dict):
+            raise Fail("Calendar could not be read completely: malformed event data", 3)
+        if ev.get("status") == "cancelled":
+            continue
+        start, end = ev.get("start") or {}, ev.get("end") or {}
+        cal = str(ev.get("CalendarID") or ev.get("calendarId") or ev.get("calendar_id") or "")
+        if not cal:
+            raise Fail("Calendar could not be read completely: an event has no calendar identity", 3)
+        attendees = ev.get("attendees") or []
+        if not isinstance(attendees, list):
+            raise Fail("Calendar could not be read completely: malformed attendees", 3)
+        me = next((a for a in attendees if isinstance(a, dict) and a.get("self")), None)
+        own = cal.lower() in ("primary", account) or ev.get("calendar_primary") is True
+        forced = ev.get("id") in count_ids
+        declined = bool(me) and me.get("responseStatus") == "declined"
+        accepted = bool(me) and me.get("responseStatus") == "accepted"
+        counted_event = forced or (own and not declined) or (not own and accepted)
+        item = {"kind": "calendar", "id": ev.get("id") or "", "title": " ".join(str(ev.get("summary") or
+                "(untitled event)").split()), "calendar": cal, "own": own,
+                "free": ev.get("transparency") == "transparent"}
+        try:
+            if start.get("dateTime"):
+                a = datetime.fromisoformat(start["dateTime"].replace("Z", "+00:00"))
+                b = datetime.fromisoformat(end["dateTime"].replace("Z", "+00:00"))
+                if a.tzinfo is None or b.tzinfo is None:
+                    raise ValueError("event times need an explicit timezone offset")
+                a, b = a.astimezone(zone), b.astimezone(zone)
+                if b <= a:
+                    raise ValueError("event end must follow start")
+                if a >= hi or b <= lo:
+                    continue
+                a, b = max(a, lo), min(b, hi)
+                item.update(start=a.hour * 60 + a.minute, end=1440 if b >= hi else b.hour * 60 + b.minute)
+            elif start.get("date"):
+                first, last = date.fromisoformat(start["date"]), date.fromisoformat(end["date"])
+                if last <= first:
+                    raise ValueError("all-day end must follow start")
+                if not first <= day < last:
+                    continue
+                item.update(allday=True, start=0, end=0)
+            else:
+                raise ValueError("no start")
+        except (ValueError, TypeError, AttributeError, KeyError):
+            if counted_event:
+                raise Fail("Calendar could not be read completely: a counted event has an unreadable time", 3)
+            else:
+                notes.append(f"shared-calendar event skipped (unreadable time): {item['title']} [{cal}]")
+            continue
+        item["counted"] = counted_event
+        item["why"] = "" if item["counted"] else ("declined" if declined else
+                      "shared invitation not accepted" if me else "shared calendar")
+        key = (ev.get("iCalUID") or item["id"], item.get("start"), item.get("end"))
+        if key in seen and (seen[key]["counted"] or not item["counted"]):
+            continue  # the same event seen through a second calendar
+        if key in seen:
+            (counted if seen[key] in counted else skipped).remove(seen[key])
+        seen[key] = item
+        (counted if item["counted"] else skipped).append(item)
+    order = lambda i: (not i.get("allday"), i["start"], i["end"], i["title"].lower())
+    return sorted(counted, key=order), sorted(skipped, key=order), warnings, notes
+
+
+def calendar_for(day, args, needed=True):
+    """(events, warnings). With --no-calendar, or when a read-only view fails, events is []."""
+    if getattr(args, "no_calendar", False):
+        return [], ["Calendar was not checked."]
+    try:
+        # Events that are not counted are dropped here without a word: normal
+        # commands never print another person's event. `excluded` is the way to see them.
+        events, _, warnings, _ = read_calendar(day, tuple(getattr(args, "count", None) or ()))
+    except Fail as e:
+        if needed:
+            raise Fail(f"{e} Nothing was changed. Tell the user; re-run with --no-calendar only if "
+                       f"they want to proceed without the Calendar check.", 3)
+        print(f"day-planner: {e}", file=sys.stderr)  # raw detail is for Tari, not the view
+        return [], ["Calendar could not be read."]
+    return events, warnings
+
+
+def overlaps(start, end, items, skip=None):
+    return [i for i in items if i is not skip and not i.get("allday") and not i.get("free")
+            and i["start"] < end and start < i["end"]]
+
+
+def guard(start, end, title, day_state, events, args, skip=None):
+    """Refuse an overlapping block unless --allow-overlap. Returns the overlaps it allowed."""
+    hits = overlaps(start, end, events + day_state.blocks, skip)
+    if hits and not args.allow_overlap:
+        raise Fail(f"Not saved: {title} {span(start, end)} on {day_title(day_state.day)} overlaps:\n"
+                   + "\n".join(f"  {line(h)}" for h in hits)
+                   + "\nAsk the user; re-run with --allow-overlap only if they confirm the overlap.", 4)
+    return hits
+
+
+def free_windows(day, items, lo, hi):
+    if day == now().date():  # today: nothing before the current time is free
+        n = now()
+        lo = max(lo, -(-(n.hour * 60 + n.minute) // 5) * 5)
+    out, cursor = [], lo
+    for i in sorted((i for i in items if not i.get("allday") and not i.get("free")), key=lambda i: i["start"]):
+        if i["start"] > cursor:
+            out.append((cursor, min(i["start"], hi)))
+        cursor = max(cursor, i["end"])
+        if cursor >= hi:
+            break
+    if cursor < hi:
+        out.append((cursor, hi))
+    return [(a, b) for a, b in out if b > a]
+
+
+def window(args):
+    lo = parse_time(args.after or DAY_START)
+    hi = parse_time(args.before or DAY_END, end=True)
+    if hi <= lo:
+        raise Fail("--before must be later than --after")
+    return lo, hi
+
+
+def tail(warnings, hits=()):
+    out = [f"⚠️ {w}" for w in warnings]
+    if hits:
+        out.append("⚠️ Overlaps " + "; ".join(line(h) for h in hits))
+    return ("\n" + "\n".join(out)) if out else ""
+
+
+# ----------------------------------------------------------------- commands --
+def checklist_lines(cl, status=None, section=None, show_done=False, keep_empty=False, only_status=False):
+    out = []
+    for name, ts in ([cl.section(section)] if section else cl.sections):
+        rows = [t for t in ts if (show_done or not t["done"])
+                and ((status is None and not only_status) or t["status"] == status)]
+        if not rows and not (keep_empty and status is None and not only_status):
+            continue
+        out += ["", f"**{name}**"] + ([
+            f"{DONE if t['done'] else dict(STATUS.values()).get(t['status'], NO_STATUS)} {t['text']}"
+            for t in rows] or ["(empty)"])
+    return out[1:]
+
+
+def cmd_show(args):
+    day = parse_day(args.day)
+    state, cl = Day(day), Checklist()
+    events, warnings = calendar_for(day, args, needed=False)
+    items = sorted(events + state.blocks, key=lambda i: (not i.get("allday"), i["start"], i["end"]))
+    warning_details = []
+    for source, current, code in (("schedule", state, "PLANNER_SCHEDULE_MALFORMED"),
+                                  ("checklist", cl, "PLANNER_CHECKLIST_MALFORMED")):
+        if current.bad:
+            message = f"Some local planner {source} entries could not be parsed; the view is incomplete."
+            warnings.append(message)
+            warning_details.append({"code": code, "source": source, "message": message,
+                                    "count": len(current.bad)})
+    if getattr(args, "no_calendar", False):
+        warning_details.append({"code": "CALENDAR_NOT_CHECKED", "source": "calendar",
+                                "message": "Calendar was not checked."})
+    elif warnings and not warning_details:
+        warning_details.append({"code": "CALENDAR_UNAVAILABLE", "source": "calendar",
+                                "message": "Calendar could not be read; schedule coverage is incomplete."})
+    elif any("Calendar" in warning for warning in warnings):
+        warning_details.append({"code": "CALENDAR_UNAVAILABLE", "source": "calendar",
+                                "message": "Calendar could not be read; schedule coverage is incomplete."})
+    data_status = "malformed" if state.bad or cl.bad else \
+                  "incomplete" if any(item["code"] == "CALENDAR_UNAVAILABLE" for item in warning_details) else "complete"
+    if args.json:
+        keep = ("kind", "id", "title", "start", "end", "allday", "free")  # no calendar addresses
+        items = [{k: i[k] for k in keep if k in i} for i in items]
+        print(json.dumps({"date": day.isoformat(), "schedule": items,
+                          "warnings": warnings,
+                          "warning_details": warning_details, "data_status": data_status,
+                          "complete": data_status == "complete",
+                          "checklist": [{"section": n, "tasks": ts} for n, ts in cl.sections]},
+                         ensure_ascii=False, indent=1))
+        return
+    out = [f"📅 **{day_title(day)}**", "", "**Schedule**"]
+    out += [line(i) for i in items] or ["Nothing scheduled."]
+    out += [f"⚠️ {w} Showing Planner blocks only." if "could not be read" in w else f"⚠️ {w}" for w in warnings]
+    # Checklist sections are durable user-defined categories. Keep them visible even
+    # when every task is completed or a section has no tasks.
+    tasks = [] if args.schedule else checklist_lines(cl, keep_empty=True)
+    if tasks:
+        out += ["", "**Checklist**"] + tasks
+    print("\n".join(out))
+
+
+def cmd_free(args):
+    day = parse_day(args.day)
+    events, warnings = calendar_for(day, args, needed=False)
+    lo, hi = window(args)
+    need = parse_dur(args.min) if args.min else 15
+    slots = [(a, b) for a, b in free_windows(day, events + Day(day).blocks, lo, hi) if b - a >= need]
+    out = [f"🕒 **Free time: {day_title(day)}** ({span(lo, hi)})"]
+    out += [f"{span(a, b)}  ({minutes(b - a)})" for a, b in slots] or ["No free time in that window."]
+    print("\n".join(out) + tail(warnings))
+
+
+def cmd_excluded(args):
+    """Diagnostic, on request only: the Calendar events normal commands leave out."""
+    day = parse_day(args.day)
+    _, skipped, _, notes = read_calendar(day)
+    out = [f"Calendar events NOT counted on {day_title(day)} (never shown, never busy):"]
+    out += [f"  {i['id']}  {line(i)}  [{i['why']}: {i['calendar']}]" for i in skipped] or ["  (none)"]
+    out += [f"  note: {n}" for n in notes]
+    out.append("Diagnostic output: do not relay it. If the user says one of these involves them, "
+               "pass --count <id> to show/free/add/place/move/resize/commute-add.")
+    print("\n".join(out))
+
+
+def cmd_add(args):
+    day = parse_day(args.day)
+    start, end = parse_range(args.range)
+    title = clean(args.title, "block title", "|")
+    state = Day(day)
+    events, warnings = calendar_for(day, args)
+    put(state, events, warnings, args, "planner", start, end, title)
+
+
+def put(state, events, warnings, args, kind, start, end, title):
+    same = [b for b in state.blocks if (b["kind"], b["start"], b["end"], b["title"].lower())
+            == (kind, start, end, title.lower())]
+    if same:
+        print(f"Already planned: {line(same[0])} ({day_title(state.day)}).")
+        return
+    hits = guard(start, end, title, state, events, args)
+    block = {"id": state.new_id(), "kind": kind, "start": start, "end": end, "title": title}
+    state.blocks.append(block)
+    state.save()
+    print(f"Added {line(block)} ({day_title(state.day)})." + tail(warnings, hits))
+
+
+def cmd_place(args):
+    day = parse_day(args.day)
+    need, title = parse_dur(args.duration), clean(args.title, "block title", "|")
+    state = Day(day)
+    events, warnings = calendar_for(day, args)
+    lo, hi = window(args)
+    slot = next(((a, a + need) for a, b in free_windows(day, events + state.blocks, lo, hi) if b - a >= need), None)
+    if not slot:
+        raise Fail(f"Not saved: no free {minutes(need)} block on {day_title(day)} within {span(lo, hi)}.", 4)
+    args.allow_overlap = False
+    put(state, events, warnings, args, "planner", slot[0], slot[1], title)
+
+
+def cmd_move(args):
+    day = parse_day(args.day)
+    state = Day(day)
+    block = state.find(args.ref)
+    dest_day = parse_day(args.to_day) if args.to_day else day
+    if not args.range and dest_day == day:
+        raise Fail("give a new time range, a new start time, or --to-day")
+    length = block["end"] - block["start"]
+    if not args.range:
+        start, end = block["start"], block["end"]
+    elif "-" in args.range.replace("–", "-") or "+" in args.range:
+        start, end = parse_range(args.range)
+    else:  # a bare start time keeps the duration
+        start = parse_time(args.range)
+        start, end = check_span(start, start + length)
+    dest = state if dest_day == day else Day(dest_day)
+    events, warnings = calendar_for(dest_day, args)
+    hits = guard(start, end, block["title"], dest, events, args, skip=block)
+    if dest is state:
+        block.update(start=start, end=end)
+    else:  # write the destination first: a crash leaves a duplicate, never a loss
+        if state.bad:
+            raise malformed(state.path, state.bad)
+        dest.blocks.append(dict(block, id=dest.new_id(), start=start, end=end))
+        dest.save()
+        state.blocks.remove(block)
+    state.save()
+    print(f"Moved {ICON[block['kind']]} {block['title']} to {span(start, end)} ({day_title(dest_day)})."
+          + tail(warnings, hits))
+
+
+def cmd_resize(args):
+    day = parse_day(args.day)
+    state = Day(day)
+    block = state.find(args.ref)
+    need = parse_dur(args.duration)
+    start, end = (block["end"] - need, block["end"]) if args.keep_end else (block["start"], block["start"] + need)
+    check_span(start, end)
+    events, warnings = calendar_for(day, args)
+    hits = guard(start, end, block["title"], state, events, args, skip=block)
+    block.update(start=start, end=end)
+    state.save()
+    print(f"Resized {line(block)} ({day_title(day)})." + tail(warnings, hits))
+
+
+def cmd_rename(args):
+    state = Day(parse_day(args.day))
+    block = state.find(args.ref)
+    block["title"] = clean(args.title, "block title", "|")
+    state.save()
+    print(f"Renamed to {line(block)} ({day_title(state.day)}).")
+
+
+def cmd_remove(args):
+    state = Day(parse_day(args.day))
+    block = state.find(args.ref)
+    state.blocks.remove(block)
+    state.save()
+    print(f"Removed {line(block)} ({day_title(state.day)}).")
+
+
+def cmd_commute(args):
+    day = parse_day(args.day)
+    need = parse_dur(args.duration)
+    state = Day(day)
+    events, warnings = calendar_for(day, args)
+    anchor = args.anchor.strip()
+    if TIME.match(anchor):
+        at, what = parse_time(anchor, end=True), None
+    else:
+        pool = [i for i in events + state.blocks if not i.get("allday") and i["kind"] != "commute"]
+        hits = [i for i in pool if i["title"].lower() == anchor.lower()] \
+            or [i for i in pool if anchor.lower() in i["title"].lower()]
+        if len(hits) != 1:
+            raise Fail((f"'{anchor}' matches {len(hits)} items" if hits else f"nothing on {day_title(day)} matches '{anchor}'")
+                       + "; give a unique title or a time instead:\n"
+                       + ("\n".join(f"  {line(i)}" for i in (hits or pool)) or "  (nothing scheduled)"))
+        what = hits[0]
+        at = what["start"] if args.direction == "to" else what["end"]
+    start, end = check_span(*((at - need, at) if args.direction == "to" else (at, at + need)))
+    title = clean(args.label, "commute label", "|") if args.label \
+        else ("Commute" if args.direction == "to" else "Commute home")
+    put(state, events, warnings, args, "commute", start, end, title)
+    if what:
+        print(f"({'Before' if args.direction == 'to' else 'After'} {line(what)}.)")
+
+
+def cmd_checklist(args):
+    cl = Checklist()
+    status = parse_status(args.status) if args.status else None
+    if args.json:
+        sections = [cl.section(args.section)] if args.section else cl.sections
+        print(json.dumps([{"section": n, "tasks": [t for t in ts if (args.all or not t["done"])
+                           and (args.status is None or t["status"] == status)]} for n, ts in sections],
+                         ensure_ascii=False, indent=1))
+        return
+    rows = checklist_lines(cl, status, args.section, args.all, keep_empty=True, only_status=args.status is not None)
+    label = status or "unlabelled"
+    head = f"**Checklist — {label} only**" if args.status is not None else "**Checklist**"
+    print("\n".join([head] + rows) if rows else
+          (f"No matching {label} tasks." if args.status is not None else "The checklist is empty."))
+
+
+def cmd_section_add(args):
+    cl, name = Checklist(), clean(args.name, "section name").lstrip("# ")
+    if not name:
+        raise Fail("section name is empty")
+    if any(s[0].lower() == name.lower() for s in cl.sections):
+        print(f"Section {name} already exists.")
+        return
+    cl.sections.append([name, []])
+    cl.save()
+    print(f"Created section {name}.")
+
+
+def cmd_section_remove(args):
+    cl = Checklist()
+    sec = cl.section(" ".join(args.name))
+    if sec[1]:
+        raise Fail(f"section {sec[0]} still has {len(sec[1])} task(s); remove or complete-and-remove them first")
+    cl.sections.remove(sec)
+    cl.save()
+    print(f"Removed section {sec[0]}.")
+
+
+def cmd_task_add(args):
+    cl, text = Checklist(), clean(args.text, "task text")
+    status = parse_status(args.status) if args.status else None
+    sec = cl.section(args.section, required=not args.create)
+    if sec is None:
+        sec = [clean(args.section, "section name").lstrip("# "), []]
+        cl.sections.append(sec)
+    if any(t["text"].lower() == text.lower() and not t["done"] for t in sec[1]):
+        print(f"Already on the checklist under {sec[0]}: {text}")
+        return
+    task = {"id": f"t{cl.next}", "done": False, "status": status, "text": text}
+    cl.next += 1
+    sec[1].append(task)
+    cl.save()
+    print(f"Added under {sec[0]}: {dict(STATUS.values()).get(status, NO_STATUS)} {text} [{task['id']}]")
+
+
+def task_cmd(change):
+    def run(args):
+        cl = Checklist()
+        name, task = cl.find(args.ref, args.section)
+        msg = change(cl, name, task, args)
+        cl.save()
+        print(msg)
+    return run
+
+
+def _status(cl, name, task, args):
+    task["status"] = parse_status(args.status)
+    return f"{name}: {dict(STATUS.values()).get(task['status'], NO_STATUS)} {task['text']} is now {task['status'] or 'unlabelled'}."
+
+
+def _done(done):
+    def change(cl, name, task, args):
+        task["done"] = done
+        return f"{name}: {DONE + ' ' if done else ''}{task['text']} marked {'complete' if done else 'open again'}."
+    return change
+
+
+def _rename(cl, name, task, args):
+    task["text"] = clean(args.text, "task text")
+    return f"{name}: task is now \"{task['text']}\"."
+
+
+def _remove(cl, name, task, args):
+    cl.section(name)[1].remove(task)
+    return f"{name}: removed \"{task['text']}\"."
+
+
+def main():
+    p = argparse.ArgumentParser(prog="day-planner", description="Day Planner state helper; run with no arguments for the full reference.")
+    sub = p.add_subparsers(dest="cmd")
+
+    def cmd(name, fn, cal=None):
+        s = sub.add_parser(name)
+        s.set_defaults(fn=fn)
+        if cal:  # "read": Calendar shown; "check": Calendar used for the overlap check
+            s.add_argument("--count", action="append", metavar="EVENT_ID",
+                           help="count this shared-calendar event as the user's own")
+            s.add_argument("--no-calendar", action="store_true")
+        if cal == "check":
+            s.add_argument("--allow-overlap", action="store_true")
+        return s
+
+    s = cmd("show", cmd_show, "read"); s.add_argument("day", nargs="?", default="today")
+    s.add_argument("--schedule", action="store_true"); s.add_argument("--json", action="store_true")
+    s = cmd("free", cmd_free, "read"); s.add_argument("day", nargs="?", default="today")
+    s.add_argument("--after"); s.add_argument("--before"); s.add_argument("--min")
+    s = cmd("excluded", cmd_excluded); s.add_argument("day", nargs="?", default="today")
+    s = cmd("add", cmd_add, "check"); s.add_argument("day"); s.add_argument("range"); s.add_argument("title", nargs="+")
+    s = cmd("place", cmd_place, "read"); s.add_argument("day"); s.add_argument("duration")
+    s.add_argument("title", nargs="+"); s.add_argument("--after"); s.add_argument("--before")
+    s = cmd("move", cmd_move, "check"); s.add_argument("day"); s.add_argument("ref")
+    s.add_argument("range", nargs="?"); s.add_argument("--to-day")
+    s = cmd("resize", cmd_resize, "check"); s.add_argument("day"); s.add_argument("ref"); s.add_argument("duration")
+    s.add_argument("--keep-end", action="store_true")
+    s = cmd("rename", cmd_rename); s.add_argument("day"); s.add_argument("ref"); s.add_argument("title", nargs="+")
+    s = cmd("remove", cmd_remove); s.add_argument("day"); s.add_argument("ref")
+    s = cmd("commute-add", cmd_commute, "check"); s.add_argument("day")
+    s.add_argument("direction", choices=["to", "home"]); s.add_argument("anchor")
+    s.add_argument("--duration", default="1h"); s.add_argument("--label")
+
+    s = cmd("checklist", cmd_checklist); s.add_argument("--status"); s.add_argument("--section")
+    s.add_argument("--all", action="store_true"); s.add_argument("--json", action="store_true")
+    s = cmd("section-add", cmd_section_add); s.add_argument("name", nargs="+")
+    s = cmd("section-remove", cmd_section_remove); s.add_argument("name", nargs="+")
+    s = cmd("task-add", cmd_task_add); s.add_argument("section"); s.add_argument("text", nargs="+")
+    s.add_argument("--status"); s.add_argument("--create", action="store_true")
+    for name, change, extra in (("task-status", _status, "status"), ("task-rename", _rename, "text"),
+                                ("task-complete", _done(True), None), ("task-reopen", _done(False), None),
+                                ("task-remove", _remove, None)):
+        s = cmd(name, task_cmd(change)); s.add_argument("ref"); s.add_argument("--section")
+        if extra:
+            s.add_argument(extra, nargs="+" if extra == "text" else None)
+
+    args = p.parse_args()
+    if not args.cmd:
+        print(__doc__)
+        return
+    try:
+        args.fn(args)
+    except Fail as e:
+        print(f"day-planner: {e}", file=sys.stderr)
+        sys.exit(e.code)
+
+
+if __name__ == "__main__":
+    main()

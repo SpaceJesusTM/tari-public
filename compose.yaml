@@ -1,0 +1,40 @@
+services:
+  tari:
+    image: tari-public:openclaw2026.9.9-gog0.40.0
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    user: "${TARI_UID:-1000}:${TARI_GID:-1000}"
+    init: true
+    entrypoint: ["node", "/app/openclaw.mjs"]
+    command: ["gateway", "--bind", "lan", "--port", "18789"]
+    working_dir: /home/node/.openclaw/workspace
+    env_file: .local/runtime.env
+    environment:
+      HOME: /home/node
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      GOG_HOME: /home/node/.config/gogcli
+      GOG_KEYRING_BACKEND: file
+      XDG_CACHE_HOME: /tmp/cache
+      TZ: "${TARI_TIMEZONE:-UTC}"
+    ports:
+      - "127.0.0.1:${TARI_PORT:-18899}:18789"
+    volumes:
+      - ./.local/state:/home/node/.openclaw
+      - ./.local/google:/home/node/.config/gogcli
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=268435456,mode=1777
+      # npm cache for explicit native plugin installs (for example Discord); installs persist in state.
+      - /home/node/.npm:rw,nosuid,nodev,size=268435456,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 360s
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:18789/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
